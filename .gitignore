@@ -1,0 +1,15 @@
+# Local build toolchain (~200 MB of third-party binaries).
+# Recreate with: scripts/fetch_toolchain.sh
+/toolchain
+
+# Build scratch space and test fixtures
+/build-tmp/
+/var/
+/node_modules/
+*.class
+__pycache__/
+
+# Keep the built APK and server binaries in dist/ (they are the deliverables),
+# but never commit local signing keys.
+*.jks
+*.keystore
