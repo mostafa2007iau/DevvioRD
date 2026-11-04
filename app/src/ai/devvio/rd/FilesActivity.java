@@ -801,15 +801,8 @@ public class FilesActivity extends Activity {
         if (!f.exists()) {
             return f;
         }
-        String baseName = name;
-        String ext = "";
-        int dot = name.lastIndexOf('.');
-        if (dot > 0) {
-            baseName = name.substring(0, dot);
-            ext = name.substring(dot);
-        }
         for (int i = 2; i < 1000; i++) {
-            File c = new File(dir, baseName + " (" + i + ")" + ext);
+            File c = new File(dir, Hosts.uniqueName(name, i));
             if (!c.exists()) {
                 return c;
             }
@@ -866,19 +859,7 @@ public class FilesActivity extends Activity {
     }
 
     private static String restBase(String host) {
-        String h = host == null ? "" : host;
-        if (h.startsWith("ws://")) {
-            h = "http://" + h.substring(5);
-        } else if (h.startsWith("wss://")) {
-            h = "https://" + h.substring(6);
-        }
-        h = h.replaceAll("/ws$", "");
-        if (!h.startsWith("http")) {
-            h = "http://" + h;
-        }
-        if (h.matches("https?://[^/:]+")) {
-            h = h + ":5900";
-        }
-        return h;
+        return Hosts.httpBase(host, Hosts.DEFAULT_PORT);
     }
+
 }

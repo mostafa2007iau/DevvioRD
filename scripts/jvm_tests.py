@@ -25,6 +25,7 @@ ECJ = os.path.join(T, "tools", "ecj.jar")
 SOURCES = [
     "app/src/ai/devvio/rd/Proto.java",
     "app/src/ai/devvio/rd/ImeBridge.java",
+    "app/src/ai/devvio/rd/Hosts.java",
 ]
 
 # ---- minimal stubs so Proto.java resolves org.json on the desktop JVM ----
@@ -72,6 +73,7 @@ public class JSONObject {
 }
 
 TEST_SOURCE = """
+import ai.devvio.rd.Hosts;
 import ai.devvio.rd.ImeBridge;
 import ai.devvio.rd.Proto;
 
@@ -120,6 +122,8 @@ public class Tests {
         protoTests();
         System.out.println("\\n=== ImeBridge: text delivery ===");
         imeTests();
+        System.out.println("\\n=== Hosts: addresses, URLs, recents ===");
+        hostTests();
         System.out.println("\\n--- summary ---");
         System.out.println(passed + " passed, " + failed + " failed");
         for (String f : failures) {
@@ -231,6 +235,66 @@ public class Tests {
         }
         Proto.Message pm2 = Proto.parse(pong, pong.length);
         eq("pong timestamp", pm2.timestamp, 555L);
+    }
+
+    static void hostTests() throws Exception {
+        // --- normalisation: the shapes users actually paste ---
+        eq("plain host unchanged", Hosts.normalize("192.168.1.10:5900"), "192.168.1.10:5900");
+        eq("ws scheme stripped", Hosts.normalize("ws://192.168.1.10:5900/ws"), "192.168.1.10:5900");
+        eq("wss scheme stripped", Hosts.normalize(" wss://rd.example.com/ws "), "rd.example.com");
+        eq("http scheme stripped", Hosts.normalize("HTTP://example.com:6000/"), "example.com:6000");
+        eq("trailing slash dropped", Hosts.normalize("example.com/"), "example.com");
+        eq("userinfo dropped", Hosts.normalize("http://u:p@host:1/ws"), "host:1");
+        eq("empty stays empty", Hosts.normalize("   "), "");
+        eq("null is empty", Hosts.normalize(null), "");
+
+        // --- port detection ---
+        check("explicit port detected", Hosts.hasPort("1.2.3.4:5900"));
+        check("bare host has no port", !Hosts.hasPort("1.2.3.4"));
+        check("non-numeric port rejected", !Hosts.hasPort("host:abc"));
+        check("out-of-range port rejected", !Hosts.hasPort("host:99999"));
+        check("empty port rejected", !Hosts.hasPort("host:"));
+        check("bracketed ipv6 without port", !Hosts.hasPort("[::1]"));
+        check("bracketed ipv6 with port", Hosts.hasPort("[::1]:5900"));
+
+        // --- default port injection ---
+        eq("port added when missing", Hosts.withPort("192.168.1.10", 5900), "192.168.1.10:5900");
+        eq("port kept when present", Hosts.withPort("192.168.1.10:7000", 5900), "192.168.1.10:7000");
+
+        // --- URL building (this is what the session and file screens use) ---
+        eq("ws url", Hosts.wsUrl("192.168.1.10", 5900), "ws://192.168.1.10:5900/ws");
+        eq("ws url from ws input", Hosts.wsUrl("ws://192.168.1.10:5900/ws", 5900),
+                "ws://192.168.1.10:5900/ws");
+        eq("secure ws url", Hosts.wsUrl("https://rd.example.com", 5900),
+                "wss://rd.example.com:5900/ws");
+        eq("http base", Hosts.httpBase("192.168.1.10", 5900), "http://192.168.1.10:5900");
+        eq("secure http base", Hosts.httpBase("wss://rd.example.com:443/ws", 5900),
+                "https://rd.example.com:443");
+        eq("empty host gives empty base", Hosts.httpBase("", 5900), "");
+
+        // --- recent hosts: newest first, deduped, blanks and repeats dropped ---
+        String blob = Hosts.pushRecent("", "a:1");
+        blob = Hosts.pushRecent(blob, "b:2");
+        blob = Hosts.pushRecent(blob, "a:1");
+        String[] rec = Hosts.parseRecents(blob);
+        eq("newest recent is first", rec[0], "a:1");
+        eq("duplicates collapsed", rec.length, 2);
+        eq("second recent kept", rec[1], "b:2");
+        eq("blank lines dropped", Hosts.parseRecents("\\n a:1 \\n\\n").length, 1);
+        eq("empty blob", Hosts.parseRecents("").length, 0);
+        eq("recents are trimmed", Hosts.parseRecents("  host:1  ")[0], "host:1");
+
+        StringBuilder many = new StringBuilder();
+        for (int i = 0; i < 20; i++) {
+            many.append(i == 0 ? "" : "\\n").append("h").append(i).append(":5900");
+        }
+        eq("recents capped at " + Hosts.MAX_RECENTS,
+                Hosts.parseRecents(many.toString()).length, Hosts.MAX_RECENTS);
+
+        // --- download names never overwrite ---
+        eq("first download keeps its name", Hosts.uniqueName("a.pdf", 1), "a.pdf");
+        eq("second download is suffixed", Hosts.uniqueName("a.pdf", 2), "a (2).pdf");
+        eq("extension-less name suffixed", Hosts.uniqueName("README", 3), "README (3)");
     }
 
     static void imeTests() throws Exception {

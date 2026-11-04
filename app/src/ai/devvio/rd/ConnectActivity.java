@@ -35,6 +35,8 @@ import java.util.List;
  */
 public class ConnectActivity extends Activity {
 
+    private static final int REQ_SCAN = 2002;
+
     private Prefs prefs;
     private EditText hostInput;
     private EditText tokenInput;
@@ -131,7 +133,23 @@ public class ConnectActivity extends Activity {
                 hideError();
             }
         });
-        Ui.addGap(card, label("آدرس سرور / Host"), this, Ui.SP_4);
+        LinearLayout hostHead = Ui.row(this);
+        hostHead.setGravity(Gravity.CENTER_VERTICAL);
+        hostHead.addView(label("آدرس سرور / Host"), Ui.lpm(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        // The address is printed in a terminal and often transported by chat:
+        // paste is the fastest way in, and it removes transcription typos.
+        TextView paste = Ui.text(this, "چسباندن", Ui.TS_CAPTION, Ui.ACCENT, true);
+        int pp = Ui.dp(this, Ui.SP_2);
+        paste.setPadding(pp, Ui.dp(this, 2), pp, Ui.dp(this, 2));
+        paste.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pasteHostFromClipboard();
+            }
+        });
+        hostHead.addView(paste);
+        Ui.addGap(card, hostHead, this, Ui.SP_4);
         Ui.addGap(card, hostInput, this, Ui.SP_2);
 
         tokenInput = Ui.input(this, "اختیاری — اگر سرور توکن دارد");
@@ -173,6 +191,30 @@ public class ConnectActivity extends Activity {
         modeHint = Ui.text(this, "", Ui.TS_CAPTION, Ui.TEXT_FAINT, false);
         modeHint.setLineSpacing(Ui.dp(this, 2), 1f);
         Ui.addGap(card, modeHint, this, Ui.SP_2);
+
+        // The web client renders a pairing QR containing a devviord:// link.
+        // Scanning it with any QR app opens this activity pre-filled.
+        LinearLayout scanRow = Ui.row(this);
+        scanRow.setGravity(Gravity.CENTER_VERTICAL);
+        scanRow.setBackground(Ui.pressable(Ui.SURFACE_2, Ui.R_MD, Ui.SURFACE_3, this));
+        int srp = Ui.dp(this, Ui.SP_3);
+        scanRow.setPadding(srp, srp, srp, srp);
+        scanRow.addView(Ui.text(this, "▣", Ui.TS_HEADING, Ui.ACCENT, true));
+        LinearLayout scanTxt = Ui.column(this);
+        TextView scanTitle = Ui.text(this, "اسکن QR جفت‌سازی", Ui.TS_CAPTION + 1, Ui.TEXT, true);
+        scanTxt.addView(scanTitle);
+        scanTxt.addView(Ui.text(this, "آدرس و توکن خودکار پر می‌شوند",
+                Ui.TS_MICRO, Ui.TEXT_FAINT, false));
+        scanRow.addView(scanTxt, withLeftMargin(Ui.lpm(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1), Ui.dp(this, Ui.SP_3)));
+        scanRow.addView(Ui.text(this, "›", 18, Ui.TEXT_FAINT, false));
+        scanRow.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openQrScanner();
+            }
+        });
+        Ui.addGap(card, scanRow, this, Ui.SP_4);
 
         connectButton = Ui.primaryButton(this, "اتصال  /  Connect");
         connectButton.setOnClickListener(new View.OnClickListener() {
@@ -288,6 +330,72 @@ public class ConnectActivity extends Activity {
         Ui.addGap(col, build, this, Ui.SP_5);
     }
 
+    /** Accepts "host:port", "http://host:port", or a whole pairing URL. */
+    private void pasteHostFromClipboard() {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null || !cm.hasPrimaryClip() || cm.getPrimaryClip() == null
+                || cm.getPrimaryClip().getItemCount() == 0) {
+            showError("کلیپ‌بورد خالی است");
+            return;
+        }
+        CharSequence cs = cm.getPrimaryClip().getItemAt(0).coerceToText(this);
+        String text = cs == null ? "" : cs.toString().trim();
+        if (text.isEmpty()) {
+            showError("کلیپ‌بورد خالی است");
+            return;
+        }
+        // A full devviord:// link carries both host and token: take both.
+        if (text.startsWith("devviord://")) {
+            try {
+                Uri u = Uri.parse(text);
+                String h = u.getQueryParameter("host");
+                String t = u.getQueryParameter("token");
+                if (h != null) {
+                    hostInput.setText(h);
+                }
+                if (t != null) {
+                    tokenInput.setText(t);
+                }
+                return;
+            } catch (Exception ignored) {
+                // fall through to the plain host path
+            }
+        }
+        String host = text.split("[^!-~]")[0];
+        hostInput.setText(host);
+        tokenInput.requestFocus();
+    }
+
+    /** Opens whatever QR reader the phone has, aimed at the pairing code. */
+    private void openQrScanner() {
+        String[] actions = {"com.google.zxing.client.android.SCAN", "android.intent.action.QR_SCAN"};
+        for (String action : actions) {
+            try {
+                Intent i = new Intent(action);
+                i.putExtra("SCAN_MODE", "QR_CODE_MODE");
+                startActivityForResult(i, REQ_SCAN);
+                return;
+            } catch (Exception ignored) {
+                // try the next one
+            }
+        }
+        showError("برنامه اسکن QR پیدا نشد — آدرس را دستی وارد کنید. ساده‌ترین راه: "
+                + "از دوربین یا لنز گوشی، QR را اسکن کنید؛ لینک devviord:// اپ را باز می‌کند.");
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == REQ_SCAN && res == RESULT_OK && data != null) {
+            String text = data.getStringExtra("SCAN_RESULT");
+            if (text != null) {
+                Intent i = new Intent(this, ConnectActivity.class);
+                i.setData(Uri.parse(text));
+                startActivity(i);
+            }
+        }
+    }
+
     private TextView label(String s) {
         TextView t = Ui.text(this, s, Ui.TS_CAPTION, Ui.TEXT_DIM, true);
         return t;
@@ -373,6 +481,24 @@ public class ConnectActivity extends Activity {
     }
 
     /**
+     * {@code launchMode="singleTop"} means a deep link delivered while this
+     * activity is already on top arrives here instead of {@code onCreate}.
+     * Without this override, scanning a pairing QR a second time did nothing
+     * at all - the app just came back to the front with the old fields.
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        prefillFromIntent();
+        checkSharedClipboard();
+        // Drop focus so the keyboard does not cover the freshly filled fields.
+        if (getCurrentFocus() != null) {
+            getCurrentFocus().clearFocus();
+        }
+    }
+
+    /**
      * Handles both internal navigation and devviord:// deep links, which is what
      * the pairing QR code encodes:
      *   devviord://connect?host=192.168.1.10:5900&token=abc&auto=1
@@ -414,16 +540,19 @@ public class ConnectActivity extends Activity {
             tokenInput.setText(token);
         }
         if (auto && host != null && !host.isEmpty()) {
+            // The intent is consumed once: a later rotation or resume must not
+            // silently reconnect (and a stale auto flag must not fire twice).
+            it.removeExtra("autoConnect");
+            if (it.getData() != null) {
+                it.setData(null);
+            }
             doConnect();
         }
     }
 
     /** Shows a friendly host:port in the field even if a full URL was received. */
     private static String normalizeDisplayHost(String raw) {
-        String h = raw.trim();
-        h = h.replaceFirst("^wss?://", "").replaceFirst("^https?://", "");
-        h = h.replaceAll("/ws$", "").replaceAll("/+$", "");
-        return h;
+        return Hosts.normalize(raw);
     }
 
     /**

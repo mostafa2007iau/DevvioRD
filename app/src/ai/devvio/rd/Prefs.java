@@ -62,49 +62,16 @@ public final class Prefs {
         sp.edit().putFloat(k, v).apply();
     }
 
-    /** Adds/serves a small most-recently-used list of hosts. */
+    /** Adds/serves a small most-recently-used list of hosts (newest first). */
     public void addRecent(String host) {
         if (host == null || host.trim().isEmpty()) {
             return;
         }
-        String cur = getString(K_RECENT, "");
-        StringBuilder sb = new StringBuilder(host.trim());
-        int count = 1;
-        for (String s : cur.split("\n")) {
-            if (s.trim().isEmpty() || s.trim().equals(host.trim())) {
-                continue;
-            }
-            if (count >= 6) {
-                break;
-            }
-            sb.append('\n').append(s.trim());
-            count++;
-        }
-        putString(K_RECENT, sb.toString());
+        putString(K_RECENT, Hosts.pushRecent(getString(K_RECENT, ""), host));
     }
 
     public String[] recents() {
-        String cur = getString(K_RECENT, "");
-        if (cur.isEmpty()) {
-            return new String[0];
-        }
-        // split() would return [""] for an empty string, so guard above; blank
-        // lines can still appear after a removal, so filter them out.
-        String[] raw = cur.split("\n");
-        int n = 0;
-        for (String r : raw) {
-            if (r != null && !r.trim().isEmpty()) {
-                n++;
-            }
-        }
-        String[] out = new String[n];
-        int i = 0;
-        for (String r : raw) {
-            if (r != null && !r.trim().isEmpty()) {
-                out[i++] = r.trim();
-            }
-        }
-        return out;
+        return Hosts.parseRecents(getString(K_RECENT, ""));
     }
 
     /** Forgets every stored host, leaving settings and the token untouched. */

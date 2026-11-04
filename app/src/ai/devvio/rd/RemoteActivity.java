@@ -54,6 +54,10 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private ScheduledExecutorService timers;
     private ScheduledFuture<?> pingTask;
     private final AtomicBoolean closing = new AtomicBoolean(false);
+    // Every connect() gets its own generation. Callbacks from an older socket
+    // (a retry closes the previous one) are ignored, otherwise the stale
+    // socket's onClosed pops the reconnect dialog right after a retry.
+    private int wsGen;
 
     // ---- state ----
     private String pointerMode = Proto.MODE_TOUCH;
@@ -106,6 +110,9 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private View statusDot;
     private TextView statsView;
     private View reconnectOverlay;
+    private TextView retryNote;
+    private Runnable autoRetry;
+    private int retryCount;
     private boolean barsVisible = true;
     private boolean barsPinned;
     private long lastBarsToggleAt;
@@ -138,6 +145,52 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
             connect();
         } else {
             finish();
+        }
+    }
+
+    /**
+     * Listener indirection so callbacks from a replaced socket can be dropped.
+     * Without it, tapping "reconnect" after a drop immediately re-opened the
+     * reconnect overlay: the old socket's close callback arrived a moment
+     * later and looked like a fresh failure.
+     */
+    private final class Conn implements WsClient.Listener {
+        private final int gen;
+
+        Conn(int gen) {
+            this.gen = gen;
+        }
+
+        private boolean stale() {
+            return gen != wsGen || closing.get();
+        }
+
+        @Override
+        public void onOpen() {
+            if (!stale()) {
+                RemoteActivity.this.onOpen();
+            }
+        }
+
+        @Override
+        public void onMessage(Proto.Message msg) {
+            if (!stale()) {
+                RemoteActivity.this.onMessage(msg);
+            }
+        }
+
+        @Override
+        public void onClosed(String reason) {
+            if (!stale()) {
+                RemoteActivity.this.onClosed(reason);
+            }
+        }
+
+        @Override
+        public void onError(Throwable t) {
+            if (!stale()) {
+                RemoteActivity.this.onError(t);
+            }
         }
     }
 
@@ -504,19 +557,23 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         closeConnection(true);
         closing.set(false);
         setStatus("در حال اتصال…", Ui.WARN);
-        ws = new WsClient(this);
+        final int gen = ++wsGen;
+        final WsClient client = new WsClient(new Conn(gen));
+        ws = client;
         final String url = wsUrl();
         final String tok = token;
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    ws.connect(url, tok, 8000);
+                    client.connect(url, tok, 8000);
                 } catch (final Throwable t) {
                     ui.post(new Runnable() {
                         @Override
                         public void run() {
-                            onConnectFailed(t.getMessage());
+                            if (gen == wsGen) {
+                                onConnectFailed(t.getMessage());
+                            }
                         }
                     });
                 }
@@ -526,14 +583,10 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     }
 
     private String wsUrl() {
-        if (host.startsWith("ws://") || host.startsWith("wss://")) {
-            String h = host;
-            if (!h.endsWith("/ws")) {
-                h = h.replaceAll("/+$", "") + "/ws";
-            }
-            return h;
-        }
-        return host;
+        // One implementation of "host the user typed" -> URL, shared with the
+        // other screens (see Hosts). Previously a host without a port worked in
+        // the connect screen but not here.
+        return Hosts.wsUrl(host, Hosts.DEFAULT_PORT);
     }
 
     @Override
@@ -637,6 +690,7 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 String server = o.optString("server", "DevvioRD");
                 setStatus("متصل · " + hostname, Ui.ACCENT);
                 hideReconnect();
+                retryCount = 0;
                 ws.send(Proto.pointerMode(pointerMode));
                 ws.send(Proto.quality(quality, fps, prefs.getFloat(Prefs.K_SCALE, 1f)));
                 showHud("متصل شد: " + hostname);
@@ -735,6 +789,10 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         host2.setGravity(Gravity.CENTER);
         Ui.addGap(box, host2, this, Ui.SP_2);
 
+        retryNote = Ui.text(this, "", Ui.TS_MICRO, Ui.TEXT_FAINT, false);
+        retryNote.setGravity(Gravity.CENTER);
+        Ui.addGap(box, retryNote, this, Ui.SP_3);
+
         TextView retry = Ui.primaryButton(this, "اتصال مجدد");
         retry.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -743,7 +801,7 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 connect();
             }
         });
-        Ui.addGap(box, retry, this, Ui.SP_5);
+        Ui.addGap(box, retry, this, Ui.SP_2);
 
         TextView back = Ui.secondaryButton(this, "بازگشت به فهرست سرورها");
         back.setOnClickListener(new View.OnClickListener() {
@@ -779,9 +837,59 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         box.setTranslationY(Ui.dp(this, 16));
         box.setAlpha(0f);
         box.animate().translationY(0).alpha(1f).setDuration(180).start();
+        scheduleAutoRetry();
+    }
+
+    /**
+     * Retries the connection on its own after a drop: a phone that loses Wi-Fi
+     * for a second should come back without the user having to do anything.
+     * The countdown is visible and the attempt backs off, so a host that is
+     * genuinely gone does not get hammered.
+     */
+    private void scheduleAutoRetry() {
+        cancelAutoRetry();
+        if (closing.get() || reconnectOverlay == null) {
+            return;
+        }
+        retryCount++;
+        // 3s, 6s, 12s ... capped at 30s.
+        final int delay = Math.min(30, 3 * (1 << Math.min(3, retryCount - 1)));
+        autoRetry = new Runnable() {
+            private int left = delay;
+
+            @Override
+            public void run() {
+                if (reconnectOverlay == null || closing.get()) {
+                    return;
+                }
+                if (retryNote != null) {
+                    retryNote.setText(left > 0
+                            ? "تلاش خودکار بعدی در " + left + " ثانیه"
+                            : "در حال اتصال…");
+                }
+                if (left <= 0) {
+                    autoRetry = null;
+                    hideReconnect();
+                    connect();
+                    return;
+                }
+                left--;
+                ui.postDelayed(this, 1000);
+            }
+        };
+        ui.post(autoRetry);
+    }
+
+    private void cancelAutoRetry() {
+        if (autoRetry != null) {
+            ui.removeCallbacks(autoRetry);
+            autoRetry = null;
+        }
     }
 
     private void hideReconnect() {
+        cancelAutoRetry();
+        retryNote = null;
         if (reconnectOverlay != null) {
             root.removeView(reconnectOverlay);
             reconnectOverlay = null;
@@ -1276,14 +1384,7 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     }
 
     private String restBase() {
-        String base = host;
-        if (base.startsWith("ws://")) {
-            base = "http://" + base.substring(5);
-        } else if (base.startsWith("wss://")) {
-            base = "https://" + base.substring(6);
-        }
-        base = base.replaceAll("/ws$", "");
-        return base;
+        return Hosts.httpBase(host, Hosts.DEFAULT_PORT);
     }
 
     // ---------------------------------------------------------------- menu
@@ -1510,6 +1611,7 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     @Override
     protected void onDestroy() {
         closing.set(true);
+        cancelAutoRetry();
         closeConnection(false);
         releaseFrame();
         super.onDestroy();
@@ -1523,6 +1625,7 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     }
 
     private void closeConnection(boolean notify) {
+        wsGen++;
         if (timers != null) {
             timers.shutdownNow();
             timers = null;
