@@ -99,8 +99,11 @@ public class RemoteView extends View {
     }
 
     public void moveLocalCursor(float dxPx, float dyPx) {
-        float w = Math.max(1, getWidth());
-        float h = Math.max(1, getHeight());
+        // Normalise against the drawn image, not the raw view: otherwise the
+        // cursor and the finger diverge by the letterbox margins.
+        computeDst();
+        float w = Math.max(1, dst.width());
+        float h = Math.max(1, dst.height());
         cx = clamp01(cx + dxPx / w);
         cy = clamp01(cy + dyPx / h);
         postInvalidateOnAnimation();
@@ -251,6 +254,12 @@ public class RemoteView extends View {
         float nx = (x - dst.left) / Math.max(1, dst.width());
         float ny = (y - dst.top) / Math.max(1, dst.height());
         return new float[]{clamp01(nx), clamp01(ny)};
+    }
+
+    /** True when a tap landed outside the letterboxed image. */
+    public boolean isOutsideImage(float x, float y) {
+        computeDst();
+        return x < dst.left || x > dst.right || y < dst.top || y > dst.bottom;
     }
 
     // ------------------------------------------------------------------

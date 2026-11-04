@@ -81,6 +81,11 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private float lastTapY;
     private boolean twoFinger;
     private float scrollAccum;
+    // Two-finger scrolling keeps its own last position; sharing lastTapX/lastTapY
+    // with the double-tap detector made the first scroll jump and could turn a
+    // scroll into a stray double click on the host.
+    private float scrollLastX = -1;
+    private float scrollLastY = -1;
     private float pointerX = 0.5f;
     private float pointerY = 0.5f;
 
@@ -98,9 +103,16 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private TextView statusPill;
     private TextView hud;
     private TextView modeChip;
+    private View statusDot;
     private TextView statsView;
     private View reconnectOverlay;
     private boolean barsVisible = true;
+    private boolean barsPinned;
+    private long lastBarsToggleAt;
+    private int framesSinceTick;
+    private long lastFpsTickAt;
+    private long lastTickFrames;
+    private double fpsNow;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -119,10 +131,8 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         statsVisible = prefs.getBool(Prefs.K_STATS, false);
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        if (Build.VERSION.SDK_INT >= 21) {
-            getWindow().setStatusBarColor(Ui.alpha(Color.BLACK, 0.6f));
-            getWindow().setNavigationBarColor(Ui.alpha(Color.BLACK, 0.6f));
-        }
+        barsPinned = prefs.getBool(Prefs.K_BARS_PINNED, false);
+        applyImmersive();
         buildUi();
         if (host != null && !host.isEmpty()) {
             connect();
@@ -196,10 +206,13 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
             }
         });
 
-        // --- top bar ---
+        // --- top bar: connection state, mode, keyboard, overflow ---
         topBar = Ui.row(this);
-        topBar.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 10), Ui.dp(this, 8));
-        topBar.setBackgroundColor(Ui.alpha(0xFF000000, 0.72f));
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+        topBar.setBackground(Ui.verticalGradient(Ui.alpha(0xFF05080C, 0.88f),
+                Ui.alpha(0xFF05080C, 0.45f), 0, this));
+        int tp = Ui.dp(this, Ui.SP_2);
+        topBar.setPadding(tp, Ui.dp(this, Ui.SP_2), tp, Ui.dp(this, Ui.SP_3));
 
         TextView back = barButton("‹");
         back.setOnClickListener(new View.OnClickListener() {
@@ -210,20 +223,33 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         });
         topBar.addView(back);
 
-        statusPill = Ui.text(this, "در حال اتصال…", 12, Ui.WARN, true);
-        statusPill.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 6));
-        statusPill.setBackground(Ui.roundRect(Ui.alpha(0xFF000000, 0.4f), 12, this));
-        topBar.addView(statusPill, Ui.lpm(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        // status: dot + label inside a translucent pill
+        LinearLayout statusBox = Ui.row(this);
+        statusBox.setGravity(Gravity.CENTER_VERTICAL);
+        statusBox.setBackground(Ui.roundRect(Ui.alpha(0xFF000000, 0.45f), Ui.R_XL, this));
+        int sp = Ui.dp(this, Ui.SP_3);
+        statusBox.setPadding(sp, Ui.dp(this, Ui.SP_1 + 2), sp, Ui.dp(this, Ui.SP_1 + 2));
+        statusDot = Ui.dot(this, Ui.WARN, 7);
+        statusBox.addView(statusDot);
+        statusPill = Ui.text(this, "در حال اتصال…", Ui.TS_MICRO + 1, Ui.WARN, true);
+        statusPill.setSingleLine(true);
+        statusPill.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams stlp = Ui.lpm(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        stlp.leftMargin = Ui.dp(this, Ui.SP_2);
+        statusBox.addView(statusPill, stlp);
+        LinearLayout.LayoutParams sbLp = Ui.lpm(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        sbLp.leftMargin = Ui.dp(this, Ui.SP_2);
+        sbLp.rightMargin = Ui.dp(this, Ui.SP_2);
+        topBar.addView(statusBox, sbLp);
 
-        TextView modeBtn = barButton("TOUCH");
-        modeChip = modeBtn;
-        modeBtn.setOnClickListener(new View.OnClickListener() {
+        modeChip = barButton(modeLabel());
+        modeChip.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 setPointerMode(Proto.MODE_MOUSE.equals(pointerMode) ? Proto.MODE_TOUCH : Proto.MODE_MOUSE);
             }
         });
-        topBar.addView(modeBtn);
+        topBar.addView(modeChip);
 
         TextView kb = barButton("⌨");
         kb.setOnClickListener(new View.OnClickListener() {
@@ -248,47 +274,44 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         tlp.gravity = Gravity.TOP;
         root.addView(topBar, tlp);
 
-        // --- bottom bar (quick actions) ---
+        // --- bottom bar: the shortcuts people actually press mid-session ---
         bottomBar = Ui.row(this);
-        bottomBar.setPadding(Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8), Ui.dp(this, 8));
-        bottomBar.setBackgroundColor(Ui.alpha(0xFF000000, 0.72f));
-        bottomBar.addView(quickAction("⌨", new View.OnClickListener() {
+        bottomBar.setGravity(Gravity.CENTER_VERTICAL);
+        bottomBar.setBackground(Ui.verticalGradient(Ui.alpha(0xFF05080C, 0.45f),
+                Ui.alpha(0xFF05080C, 0.9f), 0, this));
+        int bp = Ui.dp(this, Ui.SP_2);
+        bottomBar.setPadding(bp, Ui.dp(this, Ui.SP_3), bp, Ui.dp(this, Ui.SP_2));
+        bottomBar.addView(quickAction("⌨", "کیبورد", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 toggleKeyboard();
             }
         }));
-        bottomBar.addView(quickAction("⎘", new View.OnClickListener() {
+        bottomBar.addView(quickAction("⎘", "کپی→سرور", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 syncClipboardToHost();
             }
         }));
-        bottomBar.addView(quickAction("⤓", new View.OnClickListener() {
+        bottomBar.addView(quickAction("⤓", "آوردن", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 pasteFromHost();
             }
         }));
-        bottomBar.addView(quickAction("⇄", new View.OnClickListener() {
+        bottomBar.addView(quickAction("⇄", "فایل‌ها", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 openFiles();
             }
         }));
-        bottomBar.addView(quickAction("⎋", new View.OnClickListener() {
+        bottomBar.addView(quickAction("⎋", "Esc", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 sendSpecialKey("Escape");
             }
         }));
-        bottomBar.addView(quickAction("⏎", new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                sendSpecialKey("Enter");
-            }
-        }));
-        bottomBar.addView(quickAction("⌫", new View.OnClickListener() {
+        bottomBar.addView(quickAction("⌫", "Back", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 sendSpecialKey("Backspace");
@@ -300,59 +323,177 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         root.addView(bottomBar, blp);
 
         // --- HUD toast ---
-        hud = Ui.text(this, "", 12, Ui.TEXT, false);
-        hud.setBackground(Ui.roundRect(Ui.alpha(0xFF000000, 0.8f), 10, this));
-        hud.setPadding(Ui.dp(this, 12), Ui.dp(this, 8), Ui.dp(this, 12), Ui.dp(this, 8));
+        hud = Ui.text(this, "", Ui.TS_CAPTION + 1, Ui.TEXT, false);
+        hud.setGravity(Gravity.CENTER);
+        hud.setBackground(Ui.roundRect(Ui.alpha(0xFF05080C, 0.88f), Ui.R_XL, this));
+        hud.setPadding(Ui.dp(this, Ui.SP_4), Ui.dp(this, Ui.SP_2 + 2),
+                Ui.dp(this, Ui.SP_4), Ui.dp(this, Ui.SP_2 + 2));
         hud.setVisibility(View.GONE);
         FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        hlp.gravity = Gravity.CENTER;
+        hlp.gravity = Gravity.CENTER_HORIZONTAL | Gravity.BOTTOM;
+        hlp.bottomMargin = Ui.dp(this, 78);
         root.addView(hud, hlp);
 
         // --- stats overlay ---
-        statsView = Ui.text(this, "", 11, Ui.ACCENT, false);
+        statsView = Ui.text(this, "", Ui.TS_MICRO, Ui.ACCENT, false);
         statsView.setTypeface(android.graphics.Typeface.MONOSPACE);
-        statsView.setBackground(Ui.roundRect(Ui.alpha(0xFF000000, 0.7f), 8, this));
-        statsView.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+        statsView.setBackground(Ui.roundRect(Ui.alpha(0xFF05080C, 0.82f), Ui.R_MD,
+                Ui.alpha(Ui.ACCENT, 0.35f), 1, this));
+        statsView.setPadding(Ui.dp(this, Ui.SP_3), Ui.dp(this, Ui.SP_2),
+                Ui.dp(this, Ui.SP_3), Ui.dp(this, Ui.SP_2));
+        statsView.setLineSpacing(Ui.dp(this, 2), 1f);
         statsView.setVisibility(View.GONE);
+        statsView.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                statsVisible = false;
+                statsView.setVisibility(View.GONE);
+                prefs.putBool(Prefs.K_STATS, false);
+            }
+        });
         FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         slp.gravity = Gravity.TOP | Gravity.LEFT;
-        slp.topMargin = Ui.dp(this, 60);
-        slp.leftMargin = Ui.dp(this, 10);
+        slp.topMargin = Ui.dp(this, 64);
+        slp.leftMargin = Ui.dp(this, Ui.SP_3);
         root.addView(statsView, slp);
 
         setContentView(root);
         statsView.setVisibility(statsVisible ? View.VISIBLE : View.GONE);
         updateModeUi();
+        applyBarsVisibility(false);
     }
 
+    /** "لمسی" / "موس" - short enough to sit in the toolbar. */
+    private String modeLabel() {
+        return Proto.MODE_MOUSE.equals(pointerMode) ? "موس" : "لمسی";
+    }
+
+    /**
+     * Hides or shows the system bars for a truly full-screen session.
+     *
+     * <p>Kept in one place because it is called from three directions: on
+     * create, from the overflow menu, and after the window regains focus (the
+     * OS restores the bars itself whenever the keyboard opens or the app is
+     * brought back to the front).
+     */
+    private void applyImmersive() {
+        View decor = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= 30) {
+            getWindow().setDecorFitsSystemWindows(false);
+            android.view.WindowInsetsController c = getWindow().getInsetsController();
+            if (c != null) {
+                c.setSystemBarsBehavior(
+                        android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                if (barsVisible) {
+                    c.show(android.view.WindowInsets.Type.systemBars());
+                } else {
+                    c.hide(android.view.WindowInsets.Type.systemBars());
+                }
+            }
+        } else {
+            int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN;
+            if (!barsVisible) {
+                flags |= View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+            }
+            decor.setSystemUiVisibility(flags);
+            if (Build.VERSION.SDK_INT >= 21) {
+                getWindow().setStatusBarColor(Ui.alpha(0xFF05080C, barsVisible ? 0.85f : 0f));
+                getWindow().setNavigationBarColor(Ui.alpha(0xFF05080C, barsVisible ? 0.85f : 0f));
+            }
+        }
+    }
+
+    /** Shows/hides our own toolbars without touching the system bars. */
+    private void applyBarsVisibility(boolean animate) {
+        applyImmersive();
+        float target = barsVisible ? 1f : 0f;
+        if (!animate) {
+            topBar.setAlpha(target);
+            bottomBar.setAlpha(target);
+            topBar.setVisibility(barsVisible ? View.VISIBLE : View.GONE);
+            bottomBar.setVisibility(barsVisible ? View.VISIBLE : View.GONE);
+            return;
+        }
+        topBar.animate().alpha(target).setDuration(160).start();
+        bottomBar.animate().alpha(target).setDuration(160).start();
+        if (barsVisible) {
+            topBar.setVisibility(View.VISIBLE);
+            bottomBar.setVisibility(View.VISIBLE);
+        } else {
+            ui.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (!barsVisible) {
+                        topBar.setVisibility(View.GONE);
+                        bottomBar.setVisibility(View.GONE);
+                    }
+                }
+            }, 170);
+        }
+    }
+
+    private void toggleBars() {
+        barsVisible = !barsVisible;
+        lastBarsToggleAt = System.currentTimeMillis();
+        applyBarsVisibility(true);
+        showHud(barsVisible ? "نوارها نمایش داده شدند" : "حالت تمام‌صفحه · برای بازگشت دو ضربه بزنید");
+    }
+
+    /** Compact translucent button for the in-session toolbars. */
     private TextView barButton(String label) {
-        TextView t = Ui.text(this, label, 15, Ui.TEXT, true);
-        t.setPadding(Ui.dp(this, 10), Ui.dp(this, 6), Ui.dp(this, 10), Ui.dp(this, 6));
-        t.setBackground(Ui.roundRect(Ui.SURFACE_2, 10, this));
+        TextView t = Ui.text(this, label, Ui.TS_LABEL + 2, Ui.TEXT, true);
+        t.setGravity(Gravity.CENTER);
+        t.setMinWidth(Ui.dp(this, 38));
+        t.setMinHeight(Ui.dp(this, 34));
+        t.setPadding(Ui.dp(this, Ui.SP_2), Ui.dp(this, Ui.SP_1),
+                Ui.dp(this, Ui.SP_2), Ui.dp(this, Ui.SP_1));
+        t.setBackground(Ui.pressable(Ui.alpha(0xFF131A22, 0.92f), Ui.R_MD,
+                Ui.alpha(0xFFFFFFFF, 0.10f), this));
+        t.setClickable(true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.leftMargin = Ui.dp(this, 6);
+        lp.leftMargin = Ui.dp(this, Ui.SP_1 + 2);
         t.setLayoutParams(lp);
         return t;
     }
 
-    private View quickAction(String label, View.OnClickListener l) {
-        TextView t = Ui.text(this, label, 18, Ui.TEXT, true);
+    /**
+     * Bottom-bar shortcut: glyph on top, tiny label underneath. The label is
+     * what makes the icons learnable - an unlabelled "⎘" means nothing until
+     * you have used the app for a week.
+     */
+    private View quickAction(String glyph, String label, View.OnClickListener l) {
+        LinearLayout box = Ui.column(this);
+        box.setGravity(Gravity.CENTER);
+        box.setBackground(Ui.pressable(Ui.alpha(0xFF131A22, 0.92f), Ui.R_MD,
+                Ui.alpha(0xFFFFFFFF, 0.08f), this));
+        int v = Ui.dp(this, Ui.SP_1 + 2);
+        box.setPadding(0, v, 0, v);
+        TextView g = Ui.text(this, glyph, 16, Ui.TEXT, true);
+        g.setGravity(Gravity.CENTER);
+        box.addView(g);
+        TextView t = Ui.text(this, label, 8.5f, Ui.TEXT_DIM, false);
         t.setGravity(Gravity.CENTER);
-        t.setBackground(Ui.roundRect(Ui.SURFACE_2, 10, this));
-        t.setOnClickListener(l);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Ui.dp(this, 42), 1);
-        lp.leftMargin = Ui.dp(this, 4);
-        lp.rightMargin = Ui.dp(this, 4);
-        t.setLayoutParams(lp);
-        return t;
+        t.setSingleLine(true);
+        box.addView(t);
+        box.setOnClickListener(l);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        lp.leftMargin = Ui.dp(this, 3);
+        lp.rightMargin = Ui.dp(this, 3);
+        box.setLayoutParams(lp);
+        return box;
     }
 
     private void updateModeUi() {
         boolean mouse = Proto.MODE_MOUSE.equals(pointerMode);
-        modeChip.setText(mouse ? "MOUSE" : "TOUCH");
+        modeChip.setText(modeLabel());
         modeChip.setTextColor(mouse ? Ui.BLUE : Ui.ACCENT);
         remoteView.setMouseMode(mouse);
     }
@@ -562,16 +703,39 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         if (reconnectOverlay != null) {
             return;
         }
+        // Scrim swallows touches so a stray tap cannot hit the remote desktop.
+        FrameLayout scrim = new FrameLayout(this);
+        scrim.setBackgroundColor(Ui.alpha(0xFF000000, 0.6f));
+        scrim.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                // intentionally inert
+            }
+        });
+
         LinearLayout box = Ui.column(this);
-        box.setBackground(Ui.roundRect(Ui.alpha(0xFF10161D, 0.97f), 18, this));
-        int p = Ui.dp(this, 22);
+        box.setBackground(Ui.roundRect(Ui.SURFACE, Ui.R_XL, Ui.LINE, 1, this));
+        int p = Ui.dp(this, Ui.SP_5);
         box.setPadding(p, p, p, p);
-        box.addView(Ui.text(this, "اتصال قطع شد", 18, Ui.TEXT, true));
+        box.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        TextView icon = Ui.text(this, "⚡", 30, Ui.DANGER, false);
+        icon.setGravity(Gravity.CENTER);
+        box.addView(icon);
+        TextView t = Ui.text(this, "اتصال قطع شد", Ui.TS_HEADING, Ui.TEXT, true);
+        t.setGravity(Gravity.CENTER);
+        Ui.addGap(box, t, this, Ui.SP_3);
         if (reason != null && !reason.isEmpty()) {
-            TextView r = Ui.text(this, reason, 12, Ui.TEXT_DIM, false);
-            box.addView(r);
+            TextView r = Ui.text(this, reason, Ui.TS_CAPTION, Ui.TEXT_DIM, false);
+            r.setGravity(Gravity.CENTER);
+            r.setLineSpacing(Ui.dp(this, 2), 1f);
+            Ui.addGap(box, r, this, Ui.SP_2);
         }
-        Button2 retry = new Button2(this, "اتصال مجدد", Ui.ACCENT, 0xFF04140C);
+        TextView host2 = Ui.mono(this, host == null ? "" : host, Ui.TS_MICRO, Ui.TEXT_FAINT);
+        host2.setGravity(Gravity.CENTER);
+        Ui.addGap(box, host2, this, Ui.SP_2);
+
+        TextView retry = Ui.primaryButton(this, "اتصال مجدد");
         retry.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -579,22 +743,42 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 connect();
             }
         });
-        Button2 back = new Button2(this, "بازگشت", Ui.SURFACE_3, Ui.TEXT);
+        Ui.addGap(box, retry, this, Ui.SP_5);
+
+        TextView back = Ui.secondaryButton(this, "بازگشت به فهرست سرورها");
         back.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 finish();
             }
         });
-        box.addView(retry, withTop(16));
-        box.addView(back, withTop(10));
+        Ui.addGap(box, back, this, Ui.SP_2);
+
+        TextView settings = Ui.text(this, "تنظیمات اتصال", Ui.TS_CAPTION, Ui.ACCENT, true);
+        settings.setGravity(Gravity.CENTER);
+        int sp = Ui.dp(this, Ui.SP_2);
+        settings.setPadding(sp, sp, sp, sp);
+        settings.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(RemoteActivity.this, SettingsActivity.class));
+            }
+        });
+        Ui.addGap(box, settings, this, Ui.SP_2);
+
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.gravity = Gravity.CENTER;
-        lp.leftMargin = Ui.dp(this, 28);
-        lp.rightMargin = Ui.dp(this, 28);
-        root.addView(box, lp);
-        reconnectOverlay = box;
+        lp.leftMargin = Ui.dp(this, Ui.SP_6);
+        lp.rightMargin = Ui.dp(this, Ui.SP_6);
+        scrim.addView(box, lp);
+        root.addView(scrim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        reconnectOverlay = scrim;
+        // Slide in instead of appearing abruptly.
+        box.setTranslationY(Ui.dp(this, 16));
+        box.setAlpha(0f);
+        box.animate().translationY(0).alpha(1f).setDuration(180).start();
     }
 
     private void hideReconnect() {
@@ -604,37 +788,36 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         }
     }
 
-    private LinearLayout.LayoutParams withTop(int topDp) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = Ui.dp(this, topDp);
-        return lp;
-    }
-
-    /** Small helper button view for overlays. */
-    private static class Button2 extends TextView {
-        Button2(Context c, String label, int bg, int fg) {
-            super(c);
-            setText(label);
-            setTextColor(fg);
-            setTextSize(15);
-            setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            setGravity(Gravity.CENTER);
-            setPadding(Ui.dp(c, 14), Ui.dp(c, 14), Ui.dp(c, 14), Ui.dp(c, 14));
-            setBackground(Ui.roundRect(bg, 14, c));
-        }
-    }
-
     private void setStatus(String s, int color) {
         statusPill.setText(s);
         statusPill.setTextColor(color);
+        if (statusDot != null) {
+            statusDot.setBackground(Ui.roundRect(color, 12, this));
+            statusDot.setAlpha(1f);
+            if (color == Ui.WARN || color == Ui.DANGER) {
+                // Pulse while connecting / after a drop: at a glance you can
+                // see whether the session is healthy or still retrying.
+                statusDot.animate().alpha(0.35f).setDuration(650)
+                        .withEndAction(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (statusDot != null) {
+                                    statusDot.animate().alpha(1f).setDuration(650).start();
+                                }
+                            }
+                        }).start();
+            } else {
+                statusDot.animate().cancel();
+            }
+        }
     }
 
     private void showHud(String s) {
         hud.setText(s);
         hud.setVisibility(View.VISIBLE);
         hud.setAlpha(1f);
-        hud.animate().alpha(0f).setStartDelay(1400).setDuration(600)
+        hud.setTranslationY(0);
+        hud.animate().alpha(0f).setStartDelay(1600).setDuration(600)
                 .withEndAction(new Runnable() {
                     @Override
                     public void run() {
@@ -658,12 +841,25 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 }
             }
         }, 2, 5, TimeUnit.SECONDS);
+        lastFpsTickAt = System.currentTimeMillis();
+        lastTickFrames = frames;
         timers.scheduleAtFixedRate(new Runnable() {
             @Override
             public void run() {
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
+                        long now = System.currentTimeMillis();
+                        long dt = now - lastFpsTickAt;
+                        if (dt >= 500) {
+                            long delta = frames - lastTickFrames;
+                            // Smooth the number: a single slow second should not
+                            // make the readout jump around while troubleshooting.
+                            double inst = delta * 1000.0 / dt;
+                            fpsNow = fpsNow == 0 ? inst : fpsNow * 0.6 + inst * 0.4;
+                            lastFpsTickAt = now;
+                            lastTickFrames = frames;
+                        }
                         if (statsVisible) {
                             updateStats();
                         }
@@ -676,13 +872,25 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private void updateStats() {
         long now = System.currentTimeMillis();
         long age = lastFrameAt == 0 ? -1 : now - lastFrameAt;
-        String s = "fps " + remoteView.measuredFps()
-                + "\n" + serverW + "x" + serverH
-                + "\nrx " + (bytes / 1024) + " KiB"
-                + "\nrtt " + (rttMs < 0 ? "?" : rttMs + " ms")
-                + "\nframe age " + (age < 0 ? "?" : age + " ms")
-                + "\nmode " + pointerMode;
+        String s = "fps        " + String.format("%.1f", fpsNow)
+                + "\ngeometry   " + serverW + "x" + serverH
+                + "\nframes     " + frames
+                + "\nreceived   " + humanBytes(bytes)
+                + "\nrtt        " + (rttMs < 0 ? "—" : rttMs + " ms")
+                + "\nframe age  " + (age < 0 ? "—" : age + " ms")
+                + "\nquality    q" + quality + " · " + fps + " fps"
+                + "\nmode       " + (Proto.MODE_MOUSE.equals(pointerMode) ? "mouse" : "touch");
         statsView.setText(s);
+    }
+
+    private static String humanBytes(long b) {
+        if (b < 1024) {
+            return b + " B";
+        }
+        if (b < 1024 * 1024) {
+            return String.format("%.1f KiB", b / 1024.0);
+        }
+        return String.format("%.1f MiB", b / (1024.0 * 1024));
     }
 
     // ----------------------------------------------------------------- input
@@ -711,6 +919,8 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 if (e.getPointerCount() >= 2) {
                     twoFinger = true;
                     dragging = false;
+                    scrollLastX = -1;
+                    scrollLastY = -1;
                     if (Proto.MODE_TOUCH.equals(pointerMode)) {
                         sendTouch(Proto.TOUCH_CANCEL, normX(lastX), normY(lastY), 0f);
                     }
@@ -738,7 +948,12 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 break;
             case MotionEvent.ACTION_UP:
                 if (twoFinger) {
+                    // A scroll gesture is not a tap: forget any pending
+                    // double-tap candidate so the next tap starts clean.
                     twoFinger = false;
+                    scrollLastX = -1;
+                    scrollLastY = -1;
+                    lastTapAt = 0;
                     break;
                 }
                 if (Proto.MODE_TOUCH.equals(pointerMode)) {
@@ -765,29 +980,28 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     }
 
     private void handleTwoFingerScroll(MotionEvent e) {
-        if (e.getPointerCount() < 2) {
+        if (e.getPointerCount() < 2 || ws == null || !connected) {
             return;
         }
-        float y0 = e.getY(0);
-        float y1 = e.getY(1);
-        float x0 = e.getX(0);
-        float x1 = e.getX(1);
-        float avgY = (y0 + y1) / 2f;
-        float avgX = (x0 + x1) / 2f;
-        if (lastTapAt == 0) {
-            lastTapAt = System.currentTimeMillis();
-            lastTapX = avgX;
-            lastTapY = avgY;
+        float avgX = (e.getX(0) + e.getX(1)) / 2f;
+        float avgY = (e.getY(0) + e.getY(1)) / 2f;
+        if (scrollLastX < 0) {
+            scrollLastX = avgX;
+            scrollLastY = avgY;
             return;
         }
-        float dy = avgY - lastTapY;
-        float dx = avgX - lastTapX;
-        lastTapX = avgX;
-        lastTapY = avgY;
-        if (Math.abs(dy) > 1 || Math.abs(dx) > 1) {
-            float scale = Ui.dp(this, 520);
-            ws.send(Proto.scroll(dx / scale, dy / scale));
+        float dx = avgX - scrollLastX;
+        float dy = avgY - scrollLastY;
+        scrollLastX = avgX;
+        scrollLastY = avgY;
+        if (Math.abs(dx) < 1.5f && Math.abs(dy) < 1.5f) {
+            return;
         }
+        // Accumulate sub-pixel movement instead of dropping it, so slow
+        // drags still scroll smoothly instead of stuttering.
+        float scale = Ui.dp(this, 480);
+        scrollAccum += Math.abs(dy);
+        ws.send(Proto.scroll(dx / scale, dy / scale));
     }
 
     private void maybeDoubleTap(float x, float y) {
@@ -796,6 +1010,15 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
             if (Proto.MODE_TOUCH.equals(pointerMode)) {
                 sendTouch(Proto.TOUCH_DOWN, normX(x), normY(y), 1f);
                 sendTouch(Proto.TOUCH_UP, normX(x), normY(y), 0f);
+                // A double tap near the top or bottom edge brings the toolbars
+                // back (and puts them away again): with the bars hidden there
+                // would otherwise be no way in or out of full screen.
+                if (!barsPinned) {
+                    float h = remoteView.getHeight();
+                    if (y < Ui.dp(this, 48) || y > h - Ui.dp(this, 48)) {
+                        toggleBars();
+                    }
+                }
             } else {
                 // Double tap in mouse mode = double click.
                 sendTouch(Proto.TOUCH_DOWN, pointerX, pointerY, 1f);
@@ -831,11 +1054,11 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     }
 
     private float normX(float x) {
-        return clamp01(x / Math.max(1, remoteView.getWidth()));
+        return remoteView.toRemote(x, 0)[0];
     }
 
     private float normY(float y) {
-        return clamp01(y / Math.max(1, remoteView.getHeight()));
+        return remoteView.toRemote(0, y)[1];
     }
 
     private static float clamp01(float v) {
@@ -1066,17 +1289,21 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     // ---------------------------------------------------------------- menu
 
     private void showMenu() {
+        final boolean mouse = Proto.MODE_MOUSE.equals(pointerMode);
         final String[] items = {
-                (Proto.MODE_MOUSE.equals(pointerMode) ? "تغییر به حالت لمسی" : "تغییر به حالت موس"),
+                mouse ? "حالت لمسی (لمس مستقیم)" : "حالت موس (تاچ‌پد)",
                 "کیفیت تصویر…",
-                "آمار / Stats",
-                "منتقل کردن کلیپ‌بورد گوشی → سرور",
-                "کپی کلیپ‌بورد سرور → گوشی",
-                "ارسال Ctrl (برای ترکیب‌ها)",
+                statsVisible ? "پنهان کردن آمار" : "نمایش آمار (fps / تأخیر)",
+                barsVisible ? "تمام‌صفحه (پنهان کردن نوارها)" : "نمایش نوارها",
+                "فرستادن کلیپ‌بورد گوشی به سرور",
+                "آوردن کلیپ‌بورد سرور به گوشی",
+                "ارسال Ctrl",
                 "ارسال Alt+Tab",
-                "فایل‌ها / File transfer",
+                "ارسال Ctrl+Alt+Del",
+                "انتقال فایل",
                 "تنظیمات",
-                "بستن اتصال",
+                "راهنما",
+                "قطع اتصال",
         };
         new AlertDialog.Builder(this)
                 .setTitle("DevvioRD")
@@ -1085,40 +1312,46 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                     public void onClick(android.content.DialogInterface d, int which) {
                         switch (which) {
                             case 0:
-                                setPointerMode(Proto.MODE_MOUSE.equals(pointerMode)
-                                        ? Proto.MODE_TOUCH : Proto.MODE_MOUSE);
+                                setPointerMode(mouse ? Proto.MODE_TOUCH : Proto.MODE_MOUSE);
                                 break;
                             case 1:
                                 showQualityDialog();
                                 break;
                             case 2:
                                 statsVisible = !statsVisible;
+                                prefs.putBool(Prefs.K_STATS, statsVisible);
                                 statsView.setVisibility(statsVisible ? View.VISIBLE : View.GONE);
                                 if (statsVisible) {
                                     updateStats();
+                                    showHud("آمار روشن شد · روی کادر بزنید تا بسته شود");
                                 }
                                 break;
                             case 3:
-                                syncClipboardToHost();
+                                toggleBars();
                                 break;
                             case 4:
-                                pasteFromHost();
+                                syncClipboardToHost();
                                 break;
                             case 5:
-                                ws.send(Proto.key("Control", "ControlLeft", "down",
-                                        false, false, false, false));
-                                showHud("Ctrl ارسال شد");
+                                pasteFromHost();
                                 break;
                             case 6:
-                                ws.send(Proto.key("Alt", "AltLeft", "down", false, false, false, false));
-                                ws.send(Proto.key("Tab", "Tab", "down", true, true, false, false));
-                                showHud("Alt+Tab ارسال شد");
+                                sendChord("Control", "ControlLeft");
                                 break;
                             case 7:
-                                openFiles();
+                                sendAltTab();
                                 break;
                             case 8:
+                                sendCtrlAltDel();
+                                break;
+                            case 9:
+                                openFiles();
+                                break;
+                            case 10:
                                 startActivity(new Intent(RemoteActivity.this, SettingsActivity.class));
+                                break;
+                            case 11:
+                                startActivity(new Intent(RemoteActivity.this, HelpActivity.class));
                                 break;
                             default:
                                 confirmExit();
@@ -1129,26 +1362,73 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 .show();
     }
 
+    private void sendChord(String key, String code) {
+        if (ws == null || !connected) {
+            return;
+        }
+        ws.send(Proto.key(key, code, "down", false, false, false, false));
+        showHud(key + " ارسال شد");
+    }
+
+    private void sendAltTab() {
+        if (ws == null || !connected) {
+            return;
+        }
+        ws.send(Proto.key("Alt", "AltLeft", "down", false, true, false, false));
+        ws.send(Proto.key("Tab", "Tab", "down", false, true, false, false));
+        ws.send(Proto.key("Tab", "Tab", "up", false, true, false, false));
+        ws.send(Proto.key("Alt", "AltLeft", "up", false, false, false, false));
+        showHud("Alt+Tab ارسال شد");
+    }
+
+    private void sendCtrlAltDel() {
+        if (ws == null || !connected) {
+            return;
+        }
+        ws.send(Proto.key("Control", "ControlLeft", "down", true, false, false, false));
+        ws.send(Proto.key("Alt", "AltLeft", "down", true, true, false, false));
+        ws.send(Proto.key("Delete", "Delete", "down", true, true, false, false));
+        ws.send(Proto.key("Delete", "Delete", "up", true, true, false, false));
+        ws.send(Proto.key("Alt", "AltLeft", "up", true, false, false, false));
+        ws.send(Proto.key("Control", "ControlLeft", "up", false, false, false, false));
+        showHud("Ctrl+Alt+Del ارسال شد");
+    }
+
     private void showQualityDialog() {
-        final String[] labels = {"عالی (q85 · 30fps)", "خوب (q70 · 20fps)", "متوسط (q55 · 15fps)",
-                "کم‌مصرف (q40 · 10fps)"};
+        final String[] labels = {
+                "عالی — q85 · 30 fps · 100%",
+                "خوب — q70 · 20 fps · 100%",
+                "متوسط — q55 · 15 fps · 80%",
+                "کم‌مصرف — q40 · 10 fps · 65%",
+        };
         final int[] q = {85, 70, 55, 40};
         final int[] f = {30, 20, 15, 10};
+        final float[] sc = {1f, 1f, 0.8f, 0.65f};
+        int current = 1;
+        for (int i = 0; i < q.length; i++) {
+            if (quality == q[i] && fps == f[i]) {
+                current = i;
+            }
+        }
         new AlertDialog.Builder(this)
                 .setTitle("کیفیت تصویر")
-                .setItems(labels, new android.content.DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        quality = q[which];
-                        fps = f[which];
-                        prefs.putInt(Prefs.K_QUALITY, quality);
-                        prefs.putInt(Prefs.K_FPS, fps);
-                        if (ws != null) {
-                            ws.send(Proto.quality(quality, fps, prefs.getFloat(Prefs.K_SCALE, 1f)));
-                        }
-                        showHud(labels[which]);
-                    }
-                })
+                .setSingleChoiceItems(labels, current,
+                        new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface d, int which) {
+                                quality = q[which];
+                                fps = f[which];
+                                prefs.putInt(Prefs.K_QUALITY, quality);
+                                prefs.putInt(Prefs.K_FPS, fps);
+                                prefs.putFloat(Prefs.K_SCALE, sc[which]);
+                                if (ws != null && ws.isConnected()) {
+                                    ws.send(Proto.quality(quality, fps, sc[which]));
+                                }
+                                showHud(labels[which]);
+                                d.dismiss();
+                            }
+                        })
+                .setNegativeButton("انصراف", null)
                 .show();
     }
 
@@ -1189,6 +1469,9 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     @Override
     protected void onResume() {
         super.onResume();
+        // Returning from the keyboard or another activity: the system restores
+        // the bars, so re-assert whatever the user had chosen.
+        applyImmersive();
         nativeKeyboard = prefs.getBool(Prefs.K_NATIVE_KB, true);
         sensitivity = prefs.getFloat("sensitivity", 1.7f);
         quality = prefs.getInt(Prefs.K_QUALITY, quality);
@@ -1202,6 +1485,15 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         remoteView.requestLayout();
+        applyImmersive();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            applyImmersive();
+        }
     }
 
     @Override

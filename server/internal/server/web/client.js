@@ -4,6 +4,14 @@
  * Mirrors the Android app: same binary protocol, same touch/mouse semantics,
  * same IME text-diffing approach, same clipboard + file transfer REST calls.
  * Written with no dependencies so it also runs from `file://` for debugging.
+ *
+ * Layout of this file:
+ *   1. protocol encoding (byte-for-byte identical to the Android client)
+ *   2. connection lifecycle
+ *   3. video decoding
+ *   4. pointer / keyboard input
+ *   5. clipboard and file transfer
+ *   6. UI glue (toolbar, stats panel, drawer, pairing, help)
  */
 (function () {
   'use strict';
@@ -87,6 +95,7 @@
   var cwd = '';
   var statsOn = false;
   var initialized = false;
+  var firstFramePending = true;
 
   var el = {};
   function $(id) { return document.getElementById(id); }
@@ -151,16 +160,67 @@
     imeSent = value;
   }
 
+
   // ------------------------------------------------------------ connection
-  function connect() {
+  var HOST_KEY = 'devviord.host';
+  var TOK_KEY = 'devviord.token';
+  var MODE_KEY = 'devviord.mode';
+  var Q_KEY = 'devviord.quality';
+  var FPS_KEY = 'devviord.fps';
+
+  function store(k, v) {
+    try { window.localStorage.setItem(k, v); } catch (e) { /* private mode */ }
+  }
+  function recall(k, fallback) {
+    try {
+      var v = window.localStorage.getItem(k);
+      return v === null ? fallback : v;
+    } catch (e) { return fallback; }
+  }
+
+  // Where to connect. A user-provided host wins; otherwise the page's own origin
+  // is used, which is the normal case because the server serves this client.
+  function wsEndpoint() {
+    var custom = (el.hostInput && el.hostInput.value || '').trim();
+    if (custom) {
+      var base = custom;
+      if (!/^wss?:\/\//.test(base)) {
+        base = (location.protocol === 'https:' ? 'wss://' : 'ws://') + base;
+      }
+      if (!/\/ws$/.test(base)) base = base.replace(/\/+$/, '') + '/ws';
+      return base;
+    }
     var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    var url = proto + location.host + '/ws';
+    return proto + location.host + '/ws';
+  }
+
+  // REST base matching wsEndpoint(): same host, http(s) instead of ws(s).
+  function restBase() {
+    var custom = (el.hostInput && el.hostInput.value || '').trim();
+    if (!custom) return '';
+    var base = custom;
+    if (/^wss?:\/\//.test(base)) {
+      base = base.replace(/^ws(s?):\/\//, function (m, s) { return 'http' + (s ? 's' : '') + '://'; });
+    } else if (!/^https?:\/\//.test(base)) {
+      base = (location.protocol === 'https:' ? 'https://' : 'http://') + base;
+    }
+    return base.replace(/\/ws$/, '').replace(/\/+$/, '');
+  }
+
+  var retryTimer = null;
+  var retryDelay = 1500;
+  var retryCount = 0;
+
+  function connect() {
+    var url = wsEndpoint();
     if (token) url += '?token=' + encodeURIComponent(token);
     setStatus('connecting…', 'warn');
+    el.overlay.style.display = 'none';
+    closing = false;
     try {
       ws = new WebSocket(url);
     } catch (e) {
-      showLoginError('Cannot open websocket: ' + e.message);
+      showLoginError('Cannot open a websocket: ' + e.message);
       return;
     }
     ws.binaryType = 'arraybuffer';
@@ -170,8 +230,8 @@
       opened = true;
       var hello = {
         version: 1,
-        client: 'web/1.0.0',
-        device: navigator.userAgent.slice(0, 60),
+        client: 'web/1.1.0',
+        device: (navigator.userAgent || 'browser').slice(0, 60),
         caps: {
           touch: true, mouse: true, clipboard: true, files: true,
           multitouch: true, keyboard: true, maxWidth: 0, maxHeight: 0, jpegQuality: quality
@@ -186,20 +246,21 @@
     };
 
     ws.onclose = function (ev) {
+      var wasConnected = connected;
       connected = false;
       stopTimers();
       setStatus('disconnected', 'err');
-      // 1006 right after an attempt usually means the HTTP upgrade was refused
-      // (bad or missing token). Ask for credentials instead of retry-looping.
-      if (ev && ev.code === 1006 && !closing && !opened) {
+      if (closing) return;
+
+      // 1006 on the very first attempt almost always means the upgrade was
+      // refused: wrong token or nothing listening. Loop on that and the user
+      // never sees why, so surface it on the login card instead.
+      if (ev && ev.code === 1006 && !opened && !wasConnected) {
+        showLoginCard();
         showLoginError('Connection refused — check the access token and that the server is running.');
         return;
       }
-      if (!closing) {
-        el.overlay.style.display = 'flex';
-        $('overlayMsg').textContent = 'The session ended. Reconnecting in 3s…';
-        setTimeout(function () { el.overlay.style.display = 'none'; connect(); }, 3000);
-      }
+      scheduleReconnect(wasConnected ? 'The session ended.' : 'Could not reach the host.');
     };
 
     ws.onerror = function () {
@@ -207,74 +268,62 @@
     };
   }
 
-  function handleMessage(buf) {
-    var type = buf[0];
-    switch (type) {
-      case T.HELLO_OK:
-        onHelloOk(JSON.parse(dec.decode(buf.subarray(1))));
-        break;
-      case T.FRAME:
-        onFrame(buf);
-        break;
-      case T.STATUS:
-        try {
-          var st = JSON.parse(dec.decode(buf.subarray(1)));
-          if (st.code !== 'hello') toast(st.message);
-        } catch (e) { /* ignore */ }
-        break;
-      case T.CLIP:
-        try {
-          var cb = JSON.parse(dec.decode(buf.subarray(1)));
-          if (cb.data) {
-            imeSent = cb.data;
-            copyToClipboard(cb.data);
-            toast('Host clipboard copied to this device');
-          }
-        } catch (e) { /* ignore */ }
-        break;
-      case T.CURSOR:
-        try {
-          var cu = JSON.parse(dec.decode(buf.subarray(1)));
-          cursorX = cu.x; cursorY = cu.y;
-          positionCursor();
-        } catch (e) { /* ignore */ }
-        break;
-      case T.SCREEN:
-        try {
-          var sc = JSON.parse(dec.decode(buf.subarray(1)));
-          serverW = sc.width; serverH = sc.height;
-        } catch (e) { /* ignore */ }
-        break;
-      case T.PONG:
-        var dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-        var ms = Number(dv.getBigInt64 ? dv.getBigInt64(1, false) : dv.getUint32(1, false) * 4294967296 + dv.getUint32(5, false));
-        rtt = Date.now() - ms;
-        break;
-      case T.ERROR:
-        try {
-          var er = JSON.parse(dec.decode(buf.subarray(1)));
-          setStatus(er.message, 'err');
-        } catch (e) { /* ignore */ }
-        break;
-    }
+  function scheduleReconnect(reason) {
+    if (closing) return;
+    retryCount++;
+    var wait = Math.min(15000, retryDelay * Math.pow(1.6, Math.min(4, retryCount - 1)));
+    el.overlay.style.display = 'flex';
+    $('overlayTitle').textContent = 'Reconnecting…';
+    $('overlayMsg').textContent = reason + ' Attempt ' + retryCount +
+      ' — retrying in ' + Math.round(wait / 1000) + 's.';
+    $('overlayBack').style.display = 'inline-flex';
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      connect();
+    }, wait);
+  }
+
+  function cancelReconnect() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  }
+
+  function showLoginCard() {
+    el.overlay.style.display = 'none';
+    $('login').style.display = 'flex';
+    $('bar').style.display = 'none';
+  }
+
+  function disconnect() {
+    closing = true;
+    cancelReconnect();
+    if (ws) { try { ws.close(1000, 'client closed'); } catch (e) { /* ignore */ } }
+    ws = null;
+    connected = false;
+    stopTimers();
+    showLoginCard();
+    setStatus('disconnected', 'err');
   }
 
   function onHelloOk(info) {
     connected = true;
     closing = false;
+    retryCount = 0;
     serverW = info.width || serverW;
     serverH = info.height || serverH;
     $('login').style.display = 'none';
     $('bar').style.display = 'flex';
     el.overlay.style.display = 'none';
+    lastFrameAt = Date.now();
     setStatus('connected · ' + (info.hostname || 'host'), 'on');
+    // Adopt the server's geometry before the first frame so touch mapping is
+    // correct immediately.
+    el.screen.style.aspectRatio = '';
     ws.send(jsonMsg(T.POINTER_MODE, { mode: mode }));
     ws.send(qualityMsg(quality, fps, 0));
     startTimers();
-    loadFiles('');
-    if (info.needsAuth === false) {
-      el.tokenInput.placeholder = 'no token required';
-    }
+    if (!fileListLoaded) loadFiles('');
+    if (info.needsAuth === false) el.tokenInput.placeholder = 'no token required';
   }
 
   function startTimers() {
@@ -287,9 +336,13 @@
       if (now - lastFpsAt >= 1000) {
         fpsValue = Math.round(frames * 1000 / (now - lastFpsAt));
         frames = 0; lastFpsAt = now;
-        if (statsOn) updateStats();
       }
-    }, 500);
+      // Poll the server for authoritative numbers: the browser only knows what
+      // it received, not what the host is actually producing or who else is
+      // attached.
+      if (statsOn && connected) refreshServerStats();
+      if (statsOn) paintStats();
+    }, 1000);
   }
 
   function stopTimers() {
@@ -298,9 +351,107 @@
     pingTimer = statTimer = null;
   }
 
-  function updateStats() {
-    setStatus('fps ' + fpsValue + ' · ' + serverW + '×' + serverH + ' · ' +
-      Math.round(bytes / 1024) + ' KiB · rtt ' + (rtt < 0 ? '?' : rtt) + 'ms', 'on');
+  var serverStats = { fps: 0, clients: 0, kbps: 0, lastFrameAge: -1, streaming: false };
+
+  function refreshServerStats() {
+    api('/api/stats').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (d) serverStats = d;
+    }).catch(function () { /* telemetry is best-effort */ });
+  }
+
+  function paintStats() {
+    var age = lastFrameAt ? Date.now() - lastFrameAt : -1;
+    // Prefer the browser's own decode rate (what the user actually sees); fall
+    // back to the server's production rate until the first poll lands.
+    var shown = fpsValue || (serverStats.streaming ? serverStats.fps : 0);
+    var fpsText = (Math.round(shown * 10) / 10) + ' fps';
+    $('stFps').textContent = fpsText;
+    var target = Math.max(5, fps * 0.6);
+    $('stFps').className = 'v ' + (shown >= target ? 'good' : shown > 0 ? 'warn' : '');
+    $('stGeo').textContent = serverW + '×' + serverH;
+    $('stRtt').textContent = rtt < 0 ? '—' : Math.round(rtt) + ' ms';
+    $('stRtt').className = 'v ' + (rtt < 0 ? '' : rtt < 80 ? 'good' : rtt < 250 ? 'warn' : 'bad');
+    $('stRx').textContent = human(bytes);
+    $('stAge').textContent = age < 0 ? '—' : age + ' ms';
+    $('stAge').className = 'v ' + (age < 0 ? '' : age > 1500 ? 'warn' : 'good');
+    $('stMode').textContent = mode;
+    $('statsFps').textContent = fpsText + ' fps';
+  }
+
+  // ------------------------------------------------------------ messages
+  function handleMessage(buf) {
+    var type = buf[0];
+    switch (type) {
+      case T.HELLO_OK:
+        try { onHelloOk(JSON.parse(dec.decode(buf.subarray(1)))); } catch (e) { /* ignore */ }
+        break;
+      case T.FRAME:
+        onFrame(buf);
+        break;
+      case T.STATUS:
+        try {
+          var st = JSON.parse(dec.decode(buf.subarray(1)));
+          if (st.code !== 'hello') setStatus(st.message || 'status', st.level === 'error' ? 'err' : 'on');
+        } catch (e) { /* ignore */ }
+        break;
+      case T.CLIP:
+        try {
+          var cb = JSON.parse(dec.decode(buf.subarray(1)));
+          if (cb.data) {
+            imeSent = cb.data;
+            copyToClipboard(cb.data);
+            toast('Host clipboard copied to this device', 'good');
+          }
+        } catch (e) { /* ignore */ }
+        break;
+      case T.CURSOR:
+        try {
+          var cu = JSON.parse(dec.decode(buf.subarray(1)));
+          if (cu.x >= 0 && cu.y >= 0) {
+            cursorX = cu.x; cursorY = cu.y;
+            positionCursor();
+          }
+        } catch (e) { /* ignore */ }
+        break;
+      case T.SCREEN:
+        try {
+          var sc = JSON.parse(dec.decode(buf.subarray(1)));
+          if (sc.width > 0) serverW = sc.width;
+          if (sc.height > 0) serverH = sc.height;
+        } catch (e) { /* ignore */ }
+        break;
+      case T.PONG:
+        try {
+          var dv2 = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+          var ms = Number(dv2.getBigInt64 ? dv2.getBigInt64(1, false)
+            : dv2.getUint32(1, false) * 4294967296 + dv2.getUint32(5, false));
+          rtt = Date.now() - ms;
+        } catch (e) { /* ignore */ }
+        break;
+      case T.POINTER_MODE:
+        try {
+          // Another client changed the mode: follow it so both devices agree.
+          var pm = JSON.parse(dec.decode(buf.subarray(1)));
+          if (pm.mode && pm.mode !== mode) setMode(pm.mode);
+        } catch (e) { /* ignore */ }
+        break;
+      case T.QUALITY:
+        try {
+          var qq = JSON.parse(dec.decode(buf.subarray(1)));
+          if (qq.quality) quality = qq.quality;
+          if (qq.fps) fps = qq.fps;
+        } catch (e) { /* ignore */ }
+        break;
+      case T.ERROR:
+        try {
+          var er = JSON.parse(dec.decode(buf.subarray(1)));
+          setStatus(er.message || 'error', 'err');
+          toast(er.message || 'Server error', 'bad');
+        } catch (e) { /* ignore */ }
+        break;
+      default:
+        break;
+    }
   }
 
   // ------------------------------------------------------------ video
@@ -326,6 +477,10 @@
       var old = el.screen.getAttribute('data-prev');
       if (old) URL.revokeObjectURL(old);
       el.screen.setAttribute('data-prev', url);
+      if (firstFramePending) {
+        firstFramePending = false;
+        el.overlay.style.display = 'none';
+      }
       drainFrames();
     };
     img.onerror = function () { URL.revokeObjectURL(url); drainFrames(); };
@@ -335,9 +490,9 @@
   // ------------------------------------------------------------ input
   function stageRect() {
     var r = el.stage.getBoundingClientRect();
-    // `object-fit: contain` letterboxes the image; mirror that math here so a
+    // `object-fit: contain` letterboxes the image; mirror that maths here so a
     // tap maps to the same relative point on the remote desktop.
-    var ar = serverW / serverH;
+    var ar = serverW / Math.max(1, serverH);
     var w = r.width, h = r.height;
     var dw, dh, dx, dy;
     if (w / h > ar) { dh = h; dw = h * ar; dx = (w - dw) / 2; dy = 0; }
@@ -348,65 +503,72 @@
   function norm(clientX, clientY) {
     var r = stageRect();
     return {
-      x: Math.min(1, Math.max(0, (clientX - r.left) / r.w)),
-      y: Math.min(1, Math.max(0, (clientY - r.top) / r.h))
+      x: Math.min(1, Math.max(0, (clientX - r.left) / Math.max(1, r.w))),
+      y: Math.min(1, Math.max(0, (clientY - r.top) / Math.max(1, r.h)))
     };
   }
 
   function positionCursor() {
     if (mode !== MODE_MOUSE) { el.cursor.style.display = 'none'; return; }
     var r = stageRect();
+    var box = el.stage.getBoundingClientRect();
     el.cursor.style.display = 'block';
-    el.cursor.style.left = (r.left - el.stage.getBoundingClientRect().left + cursorX * r.w) + 'px';
-    el.cursor.style.top = (r.top - el.stage.getBoundingClientRect().top + cursorY * r.h) + 'px';
+    el.cursor.style.left = (r.left - box.left + cursorX * r.w) + 'px';
+    el.cursor.style.top = (r.top - box.top + cursorY * r.h) + 'px';
   }
 
   function sendTouch(action, x, y, pressure) {
     if (connected) ws.send(touchMsg(action, x, y, pressure));
   }
 
+  var lastMoveSent = 0;
+
   function onDown(x, y) {
     downX = x; downY = y; lastX = x; lastY = y; dragging = false;
     if (mode === MODE_TOUCH) sendTouch(TOUCH_DOWN, x, y, 1);
+    else sendTouch(TOUCH_MOVE, cursorX, cursorY, 1);
   }
 
   function onMove(x, y) {
     if (mode === MODE_TOUCH) {
+      // Throttled like the Android client: 60 Hz pointer events would otherwise
+      // flood a 20 fps stream with useless samples.
+      var now = Date.now();
+      if (now - lastMoveSent < 12) return;
+      lastMoveSent = now;
       sendTouch(TOUCH_MOVE, x, y, 1);
     } else {
-      // trackpad behaviour: relative movement of the virtual cursor
+      // Trackpad behaviour: relative movement of the virtual cursor.
       var r = stageRect();
-      cursorX = Math.min(1, Math.max(0, cursorX + (x - lastX) * (serverW / r.w) * 0.9));
-      cursorY = Math.min(1, Math.max(0, cursorY + (y - lastY) * (serverH / r.h) * 0.9));
+      cursorX = Math.min(1, Math.max(0, cursorX + (x - lastX) * (serverW / Math.max(1, r.w)) * 0.9));
+      cursorY = Math.min(1, Math.max(0, cursorY + (y - lastY) * (serverH / Math.max(1, r.h)) * 0.9));
       lastX = x; lastY = y;
       sendTouch(TOUCH_MOVE, cursorX, cursorY, 1);
       positionCursor();
     }
-    if (!dragging && Math.hypot(x * 1000 - downX * 1000, y * 1000 - downY * 1000) > 8) dragging = true;
+    if (!dragging && Math.hypot(x - downX, y - downY) > 0.012) dragging = true;
   }
 
   function onUp(x, y) {
+    var now = Date.now();
+    var isDouble = now - lastTapAt < 320 && Math.hypot(x - lastTapX, y - lastTapY) < 0.04;
+
     if (mode === MODE_TOUCH) {
       sendTouch(TOUCH_UP, x, y, 0);
+      if (isDouble) {
+        sendTouch(TOUCH_DOWN, x, y, 1);
+        sendTouch(TOUCH_UP, x, y, 0);
+      }
     } else if (!dragging) {
       sendTouch(TOUCH_DOWN, cursorX, cursorY, 1);
       sendTouch(TOUCH_UP, cursorX, cursorY, 0);
-    }
-    var now = Date.now();
-    if (now - lastTapAt < 320 && Math.hypot(x - lastTapX, y - lastTapY) < 0.04) {
-      if (mode === MODE_TOUCH) {
-        sendTouch(TOUCH_DOWN, x, y, 1);
-        sendTouch(TOUCH_UP, x, y, 0);
-      } else {
-        sendTouch(TOUCH_DOWN, cursorX, cursorY, 1);
-        sendTouch(TOUCH_UP, cursorX, cursorY, 0);
+      if (isDouble) {
         sendTouch(TOUCH_DOWN, cursorX, cursorY, 1);
         sendTouch(TOUCH_UP, cursorX, cursorY, 0);
       }
-      lastTapAt = 0;
-      return;
     }
-    lastTapAt = now; lastTapX = x; lastTapY = y;
+
+    if (isDouble) { lastTapAt = 0; } else { lastTapAt = now; lastTapX = x; lastTapY = y; }
     dragging = false;
   }
 
@@ -414,7 +576,9 @@
     var active = {}, activeCount = 0, scrollState = null;
 
     el.stage.addEventListener('pointerdown', function (e) {
-      if (e.target.closest && e.target.closest('#drawer')) return;
+      // Panels float above the stage; never treat a tap on them as remote input.
+      if (e.target.closest && e.target.closest('#drawer, #pairPanel, #help, #stats, #overlay')) return;
+      if (e.button !== undefined && e.button !== 0) return;
       el.stage.setPointerCapture(e.pointerId);
       active[e.pointerId] = { x: e.clientX, y: e.clientY };
       activeCount++;
@@ -493,10 +657,45 @@
     'PageUp': 'PageUp', 'PageDown': 'PageDown'
   };
 
+  function focusIme() {
+    if (!el.ime) return;
+    try { el.ime.focus({ preventScroll: true }); } catch (e) { el.ime.focus(); }
+    // Mobile browsers only open the keyboard from a real user gesture, which is
+    // exactly what the toolbar button is.
+    el.ime.value = '';
+    imeSuppress = true;
+    if (typeof el.ime.setSelectionRange === 'function') {
+      try { el.ime.setSelectionRange(0, 0); } catch (e) { /* ignore */ }
+    }
+  }
+
   function bindKeyboard() {
     document.addEventListener('keydown', function (e) {
       if (!connected) return;
       if (e.target && e.target.tagName === 'INPUT' && e.target.id !== 'ime') return;
+
+      // Single-key shortcuts, only when no modifier is held so they never
+      // shadow real Ctrl/Alt combos destined for the host.
+      if (!e.ctrlKey && !e.altKey && !e.metaKey && e.key && e.key.length === 1) {
+        var k = e.key.toLowerCase();
+        if (k === 'm') { e.preventDefault(); setMode(mode === MODE_MOUSE ? MODE_TOUCH : MODE_MOUSE); return; }
+        if (k === 'k') { e.preventDefault(); focusIme(); toast('Keyboard ready'); return; }
+        if (k === 'f') { e.preventDefault(); toggleDrawer(); return; }
+        if (k === 'i') { e.preventDefault(); toggleStats(); return; }
+        if (k === '?') { e.preventDefault(); showHelp(true); return; }
+      }
+      if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); return; }
+      if (e.key === 'Escape') {
+        // Close whatever overlay is open, otherwise release the host's keys.
+        if (closeTopOverlay()) { e.preventDefault(); return; }
+        if (connected) {
+          e.preventDefault();
+          sendKey('Escape', 'down', {});
+          ws.send(jsonMsg(T.KEY, { key: 'Escape', action: 'up', mods: {} }));
+        }
+        return;
+      }
+
       var mods = { ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey };
       var key = KEY_MAP[e.key];
       if (!key && e.key.length === 1 && (e.ctrlKey || e.altKey || e.metaKey)) key = e.key;
@@ -510,14 +709,14 @@
       }
       // Printable characters are handled by the IME field (see below).
       if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-        el.ime.focus({ preventScroll: true });
+        if (document.activeElement !== el.ime) {
+          try { el.ime.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+        }
       }
     });
 
-    var lastImeValue = '';
     el.ime.addEventListener('input', function () {
       imeChanged(el.ime.value);
-      lastImeValue = el.ime.value;
     });
 
     document.addEventListener('paste', function (e) {
@@ -529,7 +728,7 @@
         imeSuppress = true;
         el.ime.value = '';
         imeSent = '';
-        toast('Pasted ' + text.length + ' chars to host');
+        toast('Pasted ' + text.length + ' characters into the host', 'good');
       }
     });
   }
@@ -558,7 +757,8 @@
     opts = opts || {};
     opts.headers = opts.headers || {};
     if (token) opts.headers['X-DevvioRD-Token'] = token;
-    return fetch(path, opts);
+    var base = restBase();
+    return fetch(base + path, opts);
   }
 
   function esc(s) {
@@ -568,28 +768,38 @@
   }
 
   function human(n) {
+    if (n == null) return '';
     if (n < 1024) return n + ' B';
     if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
     if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
     return (n / 1073741824).toFixed(2) + ' GB';
   }
 
+  var fileListLoaded = false;
+
   function loadFiles(dir) {
     cwd = dir || '';
     var list = $('filelist');
-    list.innerHTML = '<div class="path">loading…</div>';
-    api('/api/files?dir=' + encodeURIComponent(cwd)).then(function (r) { return r.json(); }).then(function (data) {
-      $('drawerPath').textContent = '/' + cwd;
+    list.innerHTML = '<div class="empty">Loading…</div>';
+    $('drawerPath').innerHTML = '📂 <b>/' + esc(cwd) + '</b>';
+    api('/api/files?dir=' + encodeURIComponent(cwd)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (data) {
+      fileListLoaded = true;
       var html = '';
-      if (cwd) html += '<div class="file" data-dir="up"><span>⬑</span><span class="name">..</span></div>';
+      if (cwd) html += '<div class="file dir" data-dir="up"><span class="ico">⬑</span>' +
+        '<span class="name">..</span><span class="size">up</span></div>';
       (data.entries || []).forEach(function (e) {
-        html += '<div class="file" data-path="' + esc(e.path) + '" data-dir="' + (e.dir ? '1' : '0') +
-          '" data-name="' + esc(e.name) + '">' +
-          '<span>' + (e.dir ? '📁' : '📄') + '</span>' +
+        html += '<div class="file' + (e.dir ? ' dir' : '') + '" data-path="' + esc(e.path) +
+          '" data-dir="' + (e.dir ? '1' : '0') + '" data-name="' + esc(e.name) + '">' +
+          '<span class="ico">' + (e.dir ? '📁' : '📄') + '</span>' +
           '<span class="name">' + esc(e.name) + '</span>' +
           '<span class="size">' + (e.dir ? '' : human(e.size)) + '</span></div>';
       });
-      if (!data.entries || !data.entries.length) html += '<div class="path">empty folder</div>';
+      if (!data.entries || !data.entries.length) {
+        html += '<div class="empty">This folder is empty.<br>Use <b>⬆ Upload</b> to send a file.</div>';
+      }
       list.innerHTML = html;
       Array.prototype.forEach.call(list.querySelectorAll('.file'), function (node) {
         node.addEventListener('click', function () {
@@ -599,15 +809,12 @@
             return;
           }
           var path = node.getAttribute('data-path');
-          if (node.getAttribute('data-dir') === '1') {
-            loadFiles(path);
-          } else {
-            download(path, node.getAttribute('data-name'));
-          }
+          if (node.getAttribute('data-dir') === '1') loadFiles(path);
+          else download(path, node.getAttribute('data-name'));
         });
       });
     }).catch(function (e) {
-      list.innerHTML = '<div class="path">failed to load: ' + esc(e.message) + '</div>';
+      list.innerHTML = '<div class="empty">Could not list files.<br>' + esc(e.message) + '</div>';
     });
   }
 
@@ -623,89 +830,176 @@
       document.body.appendChild(a);
       a.click();
       setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
-      toast('Saved ' + name);
-    }).catch(function (e) { toast('Download failed: ' + e.message); });
+      toast('Saved ' + name, 'good');
+    }).catch(function (e) { toast('Download failed: ' + e.message, 'bad'); });
   }
 
+  // Upload queue with a live progress line: large files over a slow link look
+  // frozen otherwise, which is the most common "it does not work" report.
+  var uploadQueue = [];
+  var uploading = false;
+
   function uploadFiles(files) {
-    var i = 0;
-    function next() {
-      if (i >= files.length) { loadFiles(cwd); return; }
-      var f = files[i++];
-      toast('Uploading ' + f.name + ' (' + human(f.size) + ')');
-      api('/api/upload/begin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: f.name, dir: cwd, size: f.size })
-      }).then(function (r) { return r.json(); }).then(function (info) {
-        var CHUNK = 1 << 20;
-        var offset = info.offset || 0;
-        function sendChunk() {
-          if (offset >= f.size) {
-            return api('/api/upload/finish', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: info.id })
-            }).then(function (r) {
-              if (!r.ok) throw new Error('finish failed');
-              toast('Uploaded ' + f.name);
-              next();
-            });
-          }
-          var slice = f.slice(offset, offset + CHUNK);
-          return slice.arrayBuffer().then(function (buf) {
-            return api('/api/upload/chunk?id=' + encodeURIComponent(info.id) + '&offset=' + offset, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/octet-stream' },
-              body: buf
-            });
+    for (var i = 0; i < files.length; i++) uploadQueue.push(files[i]);
+    if (!uploading) pumpUploads();
+  }
+
+  function showUploadProgress(text, ratio) {
+    var foot = document.querySelector('.drawer-foot');
+    if (!foot) return;
+    var box = document.getElementById('upProgress');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'upProgress';
+      box.className = 'up-item';
+      foot.parentNode.insertBefore(box, foot);
+    }
+    box.innerHTML = '<b>' + esc(text) + '</b>' + (ratio != null
+      ? '<div class="bar-mini"><i style="width:' + Math.round(ratio * 100) + '%"></i></div>'
+      : '');
+  }
+
+  function pumpUploads() {
+    if (!uploadQueue.length) {
+      uploading = false;
+      var box = document.getElementById('upProgress');
+      if (box) setTimeout(function () { if (box.parentNode) box.parentNode.removeChild(box); }, 1200);
+      loadFiles(cwd);
+      return;
+    }
+    uploading = true;
+    var f = uploadQueue.shift();
+    var CHUNK = 1 << 20;
+    showUploadProgress('Uploading ' + f.name + ' (' + human(f.size) + ')', 0);
+    api('/api/upload/begin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: f.name, dir: cwd, size: f.size })
+    }).then(function (r) {
+      if (!r.ok) throw new Error('begin failed (' + r.status + ')');
+      return r.json();
+    }).then(function (info) {
+      var offset = info.offset || 0;
+      function sendChunk() {
+        if (offset >= f.size) {
+          return api('/api/upload/finish', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: info.id })
           }).then(function (r) {
-            if (!r.ok) throw new Error('chunk failed (' + r.status + ')');
-            offset += CHUNK;
-            return sendChunk();
+            if (!r.ok) throw new Error('finish failed');
+            toast('Uploaded ' + f.name, 'good');
           });
         }
-        return sendChunk();
-      }).catch(function (e) {
-        toast('Upload failed: ' + e.message);
-        next();
-      });
-    }
-    next();
+        var slice = f.slice(offset, offset + CHUNK);
+        return slice.arrayBuffer().then(function (buf) {
+          return api('/api/upload/chunk?id=' + encodeURIComponent(info.id) + '&offset=' + offset, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: buf
+          });
+        }).then(function (r) {
+          if (!r.ok) throw new Error('chunk failed (' + r.status + ')');
+          offset = Math.min(f.size, offset + CHUNK);
+          showUploadProgress('Uploading ' + f.name + ' — ' + human(offset) + ' / ' + human(f.size),
+            f.size ? offset / f.size : 1);
+          return sendChunk();
+        });
+      }
+      return sendChunk();
+    }).then(function () {
+      pumpUploads();
+    }).catch(function (e) {
+      toast('Upload failed: ' + e.message, 'bad');
+      pumpUploads();
+    });
   }
 
   // ------------------------------------------------------------ ui glue
   function setStatus(text, kind) {
     var s = $('status');
+    if (!s) return;
     s.textContent = text;
     s.className = 'pill' + (kind ? ' ' + kind : '');
   }
 
   var toastTimer = null;
-  function toast(msg) {
+  function toast(msg, kind) {
     var t = $('toast');
+    if (!t) return;
     t.textContent = msg;
-    t.classList.add('show');
+    t.className = 'show' + (kind ? ' ' + kind : '');
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.classList.remove('show'); }, 1800);
+    toastTimer = setTimeout(function () { t.className = ''; }, 2200);
   }
 
   function setMode(m) {
     mode = m;
+    store(MODE_KEY, m);
     var b = $('modeBtn');
-    b.textContent = m === MODE_MOUSE ? 'MOUSE' : 'TOUCH';
-    b.classList.toggle('active', m === MODE_MOUSE);
+    if (b) {
+      b.textContent = m === MODE_MOUSE ? 'MOUSE' : 'TOUCH';
+      b.classList.toggle('active', m === MODE_MOUSE);
+    }
     el.stage.classList.toggle('mouse-mode', m === MODE_MOUSE);
+    var st = $('stMode');
+    if (st) st.textContent = m;
     positionCursor();
     if (connected) ws.send(jsonMsg(T.POINTER_MODE, { mode: m }));
     toast(m === MODE_MOUSE ? 'Mouse mode: drag to move, tap to click' : 'Touch mode: tap directly');
   }
 
   function showLoginError(msg) {
-    $('loginErr').textContent = msg;
+    var e = $('loginErr');
+    if (e) e.textContent = msg || '';
   }
 
-  // ------------------------------------------------------------ pairing
+  function toggleStats() {
+    statsOn = !statsOn;
+    $('stats').classList.toggle('on', statsOn);
+    $('statsBtn').classList.toggle('active', statsOn);
+    if (statsOn) { paintStats(); if (connected) refreshServerStats(); }
+  }
+
+  function toggleDrawer(force) {
+    var open = typeof force === 'boolean' ? force : !$('drawer').classList.contains('open');
+    $('drawer').classList.toggle('open', open);
+    $('filesBtn').classList.toggle('active', open);
+    if (open) loadFiles(cwd);
+  }
+
+  function showHelp(on) {
+    $('help').classList.toggle('open', !!on);
+  }
+
+  function showPair(on) {
+    var panel = $('pairPanel');
+    panel.classList.toggle('open', !!on);
+    $('pairBtn').classList.toggle('active', !!on);
+    if (!on) return;
+    api('/api/pair').then(function (r) { return r.json(); }).then(function (info) {
+      $('qrBox').innerHTML = renderQR(info.qr);
+      $('pairUrl').textContent = info.pairUrl || '';
+      $('pairHint').innerHTML = info.auth
+        ? '<b>Step 1.</b> Scan the code with the DevvioRD app.<br>' +
+          '<b>Step 2.</b> Enter the access token shown on the server console.<br>' +
+          'The QR intentionally omits the token unless the server runs with <b>--pair-public</b>.'
+        : '<b>Step 1.</b> Scan the code with the DevvioRD app.<br>' +
+          'No token is configured, so the app connects as soon as you scan.';
+    }).catch(function (e) {
+      $('qrBox').innerHTML = '';
+      $('pairHint').textContent = 'Could not load pairing info: ' + e.message;
+    });
+  }
+
+  // Closes whichever floating panel is on top; returns true when it closed one.
+  function closeTopOverlay() {
+    if ($('help').classList.contains('open')) { showHelp(false); return true; }
+    if ($('pairPanel').classList.contains('open')) { showPair(false); return true; }
+    if ($('drawer').classList.contains('open')) { toggleDrawer(false); return true; }
+    return false;
+  }
+
   function renderQR(matrix) {
     if (!matrix || !matrix.length) return '';
     var n = matrix.length;
@@ -722,19 +1016,219 @@
       '" fill="#fff"/><path d="' + path + '" fill="#000"/></svg>';
   }
 
-  function showPairPanel() {
-    var panel = $('pairPanel');
-    panel.classList.add('open');
-    api('/api/pair').then(function (r) { return r.json(); }).then(function (info) {
-      $('qrBox').innerHTML = renderQR(info.qr);
-      $('pairUrl').textContent = info.pairUrl || '';
-      $('pairHint').textContent = info.auth
-        ? 'Token required. The QR contains only the address — enter the token in the app.'
-        : 'No token configured: scanning connects immediately.';
-    }).catch(function (e) {
-      $('qrBox').innerHTML = '';
-      $('pairHint').textContent = 'Could not load pairing info: ' + e.message;
+  function toggleFullscreen() {
+    var d = document;
+    if (!d.fullscreenElement && !d.webkitFullscreenElement) {
+      var el2 = d.documentElement;
+      (el2.requestFullscreen || el2.webkitRequestFullscreen || function () { }).call(el2);
+    } else {
+      (d.exitFullscreen || d.webkitExitFullscreen || function () { }).call(d);
+    }
+  }
+
+  // Session menu: the long tail of actions, kept out of the toolbar.
+  function showMenu() {
+    var panel = document.getElementById('sessionMenu');
+    if (panel) { panel.parentNode.removeChild(panel); return; }
+    panel = document.createElement('div');
+    panel.id = 'sessionMenu';
+    panel.style.cssText = 'position:absolute;right:10px;top:48px;z-index:24;background:var(--surface);' +
+      'border:1px solid var(--line);border-radius:14px;padding:6px;box-shadow:var(--shadow);min-width:210px';
+    var items = [
+      ['⌨  Keyboard', function () { focusIme(); }],
+      ['📋  Send clipboard → host', function () { pushClipboard(); }],
+      ['📋  Copy host clipboard', function () { pullClipboard(); }],
+      ['🔁  Reconnect', function () { closing = false; connect(); }],
+      ['⛶  Fullscreen', toggleFullscreen],
+      ['⌘  Pair a phone', function () { showPair(true); }],
+      ['?  Shortcuts', function () { showHelp(true); }],
+      ['⏻  Disconnect', disconnect]
+    ];
+    items.forEach(function (it) {
+      var b = document.createElement('button');
+      b.className = 'btn';
+      b.style.cssText = 'width:100%;justify-content:flex-start;margin:2px 0;padding:10px 12px';
+      b.textContent = it[0];
+      b.addEventListener('click', function () {
+        panel.parentNode.removeChild(panel);
+        it[1]();
+      });
+      panel.appendChild(b);
     });
+    el.stage.appendChild(panel);
+    setTimeout(function () {
+      document.addEventListener('pointerdown', function close(ev) {
+        if (!panel.contains(ev.target) && ev.target.id !== 'menuBtn') {
+          if (panel.parentNode) panel.parentNode.removeChild(panel);
+          document.removeEventListener('pointerdown', close);
+        }
+      });
+    }, 0);
+  }
+
+  function pushClipboard() {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      toast('This browser does not allow reading the clipboard — use Ctrl+V instead', 'bad');
+      return;
+    }
+    navigator.clipboard.readText().then(function (text) {
+      if (!text) { toast('Clipboard is empty'); return; }
+      api('/api/clipboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text })
+      }).then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        if (connected) ws.send(jsonMsg(T.CLIPBOARD, { kind: 'text', data: text }));
+        imeSent = text;
+        toast('Clipboard sent to the host (' + text.length + ' chars)', 'good');
+      }).catch(function (e) { toast('Failed: ' + e.message, 'bad'); });
+    }).catch(function () {
+      toast('Permission denied — press Ctrl+V in the page instead', 'bad');
+    });
+  }
+
+  function pullClipboard() {
+    api('/api/clipboard').then(function (r) { return r.json(); }).then(function (d) {
+      if (!d.text) { toast('Host clipboard is empty'); return; }
+      copyToClipboard(d.text);
+      imeSent = d.text;
+      toast('Host clipboard copied here (' + d.text.length + ' chars)', 'good');
+    }).catch(function (e) { toast('Failed: ' + e.message, 'bad'); });
+  }
+
+  function showQualityMenu() {
+    var panel = document.getElementById('qualityMenu');
+    if (panel) { panel.parentNode.removeChild(panel); return; }
+    panel = document.createElement('div');
+    panel.id = 'qualityMenu';
+    panel.style.cssText = 'position:absolute;right:10px;top:48px;z-index:24;background:var(--surface);' +
+      'border:1px solid var(--line);border-radius:14px;padding:10px;box-shadow:var(--shadow);width:250px';
+    panel.innerHTML = '<div style="font-size:11px;color:var(--dim);font-weight:700;' +
+      'letter-spacing:.06em;margin-bottom:4px">STREAM QUALITY</div>';
+    [['Sharp', 85, 30], ['Balanced', 70, 20], ['Data saver', 55, 15], ['Low bandwidth', 40, 10]]
+      .forEach(function (p) {
+        var b = document.createElement('button');
+        b.className = 'btn' + (quality === p[1] ? ' active' : '');
+        b.style.cssText = 'width:100%;justify-content:space-between;margin:2px 0;padding:10px 12px';
+        b.innerHTML = '<span>' + p[0] + '</span><span style="color:var(--dim);font-size:11px">q' +
+          p[1] + ' · ' + p[2] + 'fps</span>';
+        b.addEventListener('click', function () {
+          quality = p[1]; fps = p[2];
+          store(Q_KEY, quality); store(FPS_KEY, fps);
+          if (connected) ws.send(qualityMsg(quality, fps, 0));
+          panel.parentNode.removeChild(panel);
+          toast('Quality: ' + p[0] + ' (q' + quality + ', ' + fps + ' fps)', 'good');
+        });
+        panel.appendChild(b);
+      });
+    el.stage.appendChild(panel);
+    setTimeout(function () {
+      document.addEventListener('pointerdown', function close(ev) {
+        if (!panel.contains(ev.target) && ev.target.id !== 'qualityBtn') {
+          if (panel.parentNode) panel.parentNode.removeChild(panel);
+          document.removeEventListener('pointerdown', close);
+        }
+      });
+    }, 0);
+  }
+
+  // Toolbar buttons collapse into the menu on narrow screens; this keeps every
+  // action reachable on a phone without horizontal scrolling.
+  function wireToolbar() {
+    $('modeBtn').addEventListener('click', function () {
+      setMode(mode === MODE_MOUSE ? MODE_TOUCH : MODE_MOUSE);
+    });
+    $('kbBtn').addEventListener('click', function () { focusIme(); toast('Keyboard ready — start typing'); });
+    $('pasteBtn').addEventListener('click', pushClipboard);
+    $('copyBtn').addEventListener('click', pullClipboard);
+    $('qualityBtn').addEventListener('click', showQualityMenu);
+    $('filesBtn').addEventListener('click', function () { toggleDrawer(); });
+    $('statsBtn').addEventListener('click', toggleStats);
+    $('pairBtn').addEventListener('click', function () { showPair(!$('pairPanel').classList.contains('open')); });
+    $('helpBtn').addEventListener('click', function () { showHelp(!$('help').classList.contains('open')); });
+    $('fsBtn').addEventListener('click', toggleFullscreen);
+    $('menuBtn').addEventListener('click', showMenu);
+
+    $('drawerClose').addEventListener('click', function () { toggleDrawer(false); });
+    $('refreshBtn').addEventListener('click', function () { loadFiles(cwd); });
+    $('uploadBtn').addEventListener('click', function () { $('uploadInput').click(); });
+    $('uploadInput').addEventListener('change', function (e) {
+      uploadFiles(e.target.files);
+      e.target.value = '';
+    });
+    $('pairClose').addEventListener('click', function () { showPair(false); });
+    $('helpClose').addEventListener('click', function () { showHelp(false); });
+    $('pairUrl').addEventListener('click', function () {
+      var url = $('pairUrl').textContent;
+      copyToClipboard(url);
+      toast('Pairing link copied', 'good');
+    });
+    $('overlayBack').addEventListener('click', function () {
+      cancelReconnect();
+      showLoginCard();
+    });
+    window.addEventListener('resize', positionCursor);
+  }
+
+  function wireLogin() {
+    // Restore the last session so returning users just press Connect.
+    el.hostInput.value = recall(HOST_KEY, '');
+    el.tokenInput.value = recall(TOK_KEY, '');
+    mode = recall(MODE_KEY, MODE_TOUCH);
+    quality = parseInt(recall(Q_KEY, '70'), 10) || 70;
+    fps = parseInt(recall(FPS_KEY, '20'), 10) || 20;
+
+    var qv = recall(Q_KEY, '70');
+    $('quality').value = quality;
+    $('fps').value = fps;
+    syncQualityLabels();
+
+    $('loginTouch').addEventListener('click', function () {
+      setLoginMode(MODE_TOUCH);
+    });
+    $('loginMouse').addEventListener('click', function () {
+      setLoginMode(MODE_MOUSE);
+    });
+    $('quality').addEventListener('input', function () { quality = parseInt(this.value, 10); syncQualityLabels(); });
+    $('fps').addEventListener('input', function () { fps = parseInt(this.value, 10); syncQualityLabels(); });
+
+    $('connectBtn').addEventListener('click', function () {
+      token = el.tokenInput.value.trim();
+      var host = el.hostInput.value.trim();
+      store(TOK_KEY, token);
+      store(HOST_KEY, host);
+      store(Q_KEY, quality); store(FPS_KEY, fps); store(MODE_KEY, mode);
+      showLoginError('');
+      var btn = $('connectBtn');
+      btn.disabled = true;
+      btn.textContent = 'Connecting…';
+      setTimeout(function () { btn.disabled = false; btn.textContent = 'Connect'; }, 4000);
+      connect();
+    });
+    el.tokenInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') $('connectBtn').click();
+    });
+    el.hostInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') $('connectBtn').click();
+    });
+
+    setLoginMode(mode);
+  }
+
+  function setLoginMode(m) {
+    mode = m;
+    store(MODE_KEY, m);
+    $('loginTouch').classList.toggle('on', m === MODE_TOUCH);
+    $('loginMouse').classList.toggle('on', m === MODE_MOUSE);
+    el.stage.classList.toggle('mouse-mode', m === MODE_MOUSE);
+  }
+
+  function syncQualityLabels() {
+    var q = parseInt($('quality').value, 10);
+    var name = q >= 85 ? 'sharp' : q >= 70 ? 'balanced' : q >= 55 ? 'data saver' : 'low bandwidth';
+    $('qualityVal').textContent = name + ' (q' + q + ')';
+    $('fpsVal').textContent = $('fps').value + ' fps';
   }
 
   function init() {
@@ -744,96 +1238,24 @@
     el.overlay = $('overlay');
     el.ime = $('ime');
     el.tokenInput = $('token');
+    el.hostInput = $('hostField');
 
     bindPointer();
     bindKeyboard();
+    wireToolbar();
+    wireLogin();
 
-    $('connectBtn').addEventListener('click', function () {
-      token = el.tokenInput.value.trim();
-      quality = parseInt($('quality').value, 10) || 70;
-      showLoginError('');
-      connect();
-    });
-    el.tokenInput.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') $('connectBtn').click();
-    });
-
-    $('modeBtn').addEventListener('click', function () {
-      setMode(mode === MODE_TOUCH ? MODE_MOUSE : MODE_TOUCH);
-    });
-    $('kbBtn').addEventListener('click', function () {
-      el.ime.value = '';
-      imeSuppress = true;
-      imeSent = '';
-      el.ime.focus();
-      toast('Keyboard ready — typing goes to the host');
-    });
-    $('pasteBtn').addEventListener('click', function () {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        navigator.clipboard.readText().then(function (text) {
-          if (!text) { toast('Clipboard is empty'); return; }
-          if (connected) ws.send(jsonMsg(T.CLIPBOARD, { kind: 'text', data: text }));
-          imeSent = text;
-          toast('Sent ' + text.length + ' chars to host clipboard');
-        }).catch(function () {
-          toast('Clipboard permission denied — use Ctrl+V in the session');
-          el.ime.focus();
-        });
-      } else {
-        toast('Use Ctrl+V to paste into the session');
-        el.ime.focus();
-      }
-    });
-    $('copyBtn').addEventListener('click', function () {
-      api('/api/clipboard').then(function (r) { return r.json(); }).then(function (d) {
-        if (d.text) {
-          copyToClipboard(d.text);
-          imeSent = d.text;
-          toast('Host clipboard copied (' + d.text.length + ' chars)');
-        } else {
-          toast('Host clipboard is empty');
-        }
-      }).catch(function (e) { toast('Failed: ' + e.message); });
-    });
-    $('pairBtn').addEventListener('click', showPairPanel);
-    $('pairClose').addEventListener('click', function () {
-      $('pairPanel').classList.remove('open');
-    });
-    $('filesBtn').addEventListener('click', function () {
-      var d = $('drawer');
-      d.classList.toggle('open');
-      if (d.classList.contains('open')) loadFiles(cwd);
-    });
-    $('drawerClose').addEventListener('click', function () { $('drawer').classList.remove('open'); });
-    $('refreshBtn').addEventListener('click', function () { loadFiles(cwd); });
-    $('uploadBtn').addEventListener('click', function () { $('uploadInput').click(); });
-    $('uploadInput').addEventListener('change', function (e) {
-      if (e.target.files && e.target.files.length) uploadFiles(Array.prototype.slice.call(e.target.files));
-      e.target.value = '';
-    });
-    $('statsBtn').addEventListener('click', function () {
-      statsOn = !statsOn;
-      this.classList.toggle('active', statsOn);
-      if (statsOn) updateStats();
-    });
-    $('fsBtn').addEventListener('click', function () {
-      if (!document.fullscreenElement) {
-        (document.documentElement.requestFullscreen || function () { }).call(document.documentElement);
-      } else {
-        (document.exitFullscreen || function () { }).call(document);
-      }
-    });
-    window.addEventListener('resize', positionCursor);
-
-    // Auto-connect when the server has no token configured.
+    // Ask the server what it is; pre-fills the token hint and detects a version
+    // mismatch before the user hits a confusing failure.
     api('/api/info').then(function (r) { return r.json(); }).then(function (info) {
-      if (info && info.auth === false) {
-        quality = info.quality || 70;
-        connect();
+      if (info && info.auth === false) el.tokenInput.placeholder = 'no token required';
+      if (info && info.version) {
+        var note = $('hostNote');
+        if (note) note.textContent = 'Server ' + info.version + ' · ' + (info.mode || 'app') +
+          ' mode · leave empty to use this page\'s server.';
       }
     }).catch(function () { /* user will connect manually */ });
 
-    setMode(MODE_TOUCH);
     initialized = true;
   }
 
@@ -852,14 +1274,20 @@
       jsonMsg: jsonMsg, touchMsg: touchMsg, scrollMsg: scrollMsg, pingMsg: pingMsg,
       commonPrefix: commonPrefix, codePointLength: codePointLength,
       state: function () {
-        return { connected: connected, mode: mode, serverW: serverW, serverH: serverH, fps: fpsValue, rtt: rtt };
+        return {
+          connected: connected, mode: mode, serverW: serverW, serverH: serverH,
+          fps: fpsValue, rtt: rtt, statsOn: statsOn, retryCount: retryCount
+        };
       },
       imeChanged: imeChanged,
       isReady: function () { return initialized; },
       setImeSent: function (v) { imeSent = v; },
       connect: connect,
       loadFiles: loadFiles,
-      setMode: setMode
+      setMode: setMode,
+      toggleStats: toggleStats,
+      showPair: showPair,
+      disconnect: disconnect
     };
   }
 })();

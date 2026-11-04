@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/devviord/devviord/server/internal/capture"
@@ -91,6 +93,12 @@ type Server struct {
 	started time.Time
 	frames  uint64
 	bytes   uint64
+
+	// rolling window for /api/stats
+	statMu     sync.Mutex
+	statFrames uint64
+	statBytes  uint64
+	statAt     time.Time
 
 	srv *http.Server
 }
@@ -389,6 +397,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("/api/info", s.handleInfo)
 	mux.HandleFunc("/api/pair", s.handlePair)
+	mux.HandleFunc("/api/stats", s.auth(s.handleStats))
 	mux.HandleFunc("/snapshot.jpg", s.auth(s.handleSnapshot))
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/api/files", s.auth(s.handleList))
@@ -543,6 +552,68 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"backendList": capture.Names(),
 	}
 	files.WriteJSON(w, http.StatusOK, out)
+}
+
+// handleStats reports live telemetry for the UI: real streaming rate, client
+// count, throughput and frame age. /api/info is static configuration; this is
+// the dynamic half, which is what a stats panel needs.
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	frames := atomic.LoadUint64(&s.frames)
+	totalBytes := atomic.LoadUint64(&s.bytes)
+
+	s.pumpMu.Lock()
+	lastAt := s.lastFrameAt
+	lastSize := len(s.lastJPEG)
+	s.pumpMu.Unlock()
+
+	// Frames per second over the window since the previous observation.
+	s.statMu.Lock()
+	prevFrames, prevBytes, prevAt := s.statFrames, s.statBytes, s.statAt
+	var fps, kbps float64
+	if !prevAt.IsZero() {
+		dt := now.Sub(prevAt).Seconds()
+		if dt > 0.05 {
+			fps = float64(frames-prevFrames) / dt
+			kbps = float64(totalBytes-prevBytes) / dt / 1024
+		}
+	}
+	s.statFrames, s.statBytes, s.statAt = frames, totalBytes, now
+	s.statMu.Unlock()
+
+	uptime := now.Sub(s.started)
+	ageMs := int64(-1)
+	if !lastAt.IsZero() {
+		ageMs = now.Sub(lastAt).Milliseconds()
+	}
+	s.mu.RLock()
+	quality, fpsTarget, scale := s.quality, s.fps, s.scale
+	mode := s.mode
+	s.mu.RUnlock()
+
+	files.WriteJSON(w, http.StatusOK, map[string]any{
+		"streaming":     s.clientCount() > 0,
+		"clients":       s.clientCount(),
+		"fps":           math.Round(fps*10) / 10,
+		"fpsTarget":     fpsTarget,
+		"quality":       quality,
+		"scale":         scale,
+		"pointerMode":   mode,
+		"frames":        frames,
+		"bytes":         totalBytes,
+		"kbps":          math.Round(kbps*10) / 10,
+		"lastFrameAge":  ageMs,
+		"lastFrameSize": lastSize,
+		"uptimeSec":     int64(uptime.Seconds()),
+		"avgFrameKiB":   avgFrameKiB(totalBytes, frames),
+	})
+}
+
+func avgFrameKiB(total uint64, frames uint64) float64 {
+	if frames == 0 {
+		return 0
+	}
+	return math.Round(float64(total)/float64(frames)/1024*10) / 10
 }
 
 func hostname() string {

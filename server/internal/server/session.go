@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/devviord/devviord/server/internal/capture"
 	"github.com/devviord/devviord/server/internal/input"
 	"github.com/devviord/devviord/server/internal/proto"
 )
@@ -312,6 +313,10 @@ func (s *session) handleMessage(b []byte) error {
 		if inj != nil {
 			inj.SetPointerMode(p.Mode)
 		}
+		// Echo the mode to every client: when one device switches to mouse the
+		// others must follow, otherwise a phone in touch mode and a browser in
+		// mouse mode fight over the same desktop.
+		s.srv.broadcastPointerMode(p.Mode)
 		return nil
 	case proto.TypeQuality:
 		var q proto.QualityEvent
@@ -418,6 +423,14 @@ func (s *session) handleHello(body []byte) error {
 	s.realtime.Store(true)
 	s.send(b)
 
+	// Prime the client with the last frame so it paints immediately instead of
+	// waiting up to a full pump interval (or forever, if the screen is static).
+	if jpeg, w, h := s.srv.LastFrame(); len(jpeg) > 0 {
+		frame := make([]byte, 0, proto.FrameHeaderSize+len(jpeg))
+		frame = proto.EncodeFrame(frame, 0, uint16(w), uint16(h), time.Now().UnixMilli(), jpeg)
+		s.send(frame)
+	}
+
 	// Push current clipboard so the phone can paste immediately.
 	if cl != nil {
 		if txt := cl.Get(); txt != "" {
@@ -448,6 +461,35 @@ func (s *session) close() {
 }
 
 // applyQuality updates streaming parameters at runtime.
+// broadcastPointerMode tells every session which pointer mode is now active.
+func (s *Server) broadcastPointerMode(mode string) {
+	b, err := proto.EncodeJSON(proto.TypePointerMode, proto.PointerModeEvent{Mode: mode})
+	if err != nil {
+		return
+	}
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	for sess := range s.sessions {
+		sess.send(b)
+	}
+}
+
+// broadcastQuality reports the settings now in effect so all attached clients
+// display the same numbers (echo == the client's own request is harmless).
+func (s *Server) broadcastQuality(quality, fps int, scale float64) {
+	b, err := proto.EncodeJSON(proto.TypeQuality, proto.QualityEvent{
+		Quality: quality, FPS: fps, Scale: scale,
+	})
+	if err != nil {
+		return
+	}
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	for sess := range s.sessions {
+		sess.send(b)
+	}
+}
+
 func (s *Server) applyQuality(q proto.QualityEvent) {
 	s.mu.Lock()
 	if q.Quality >= 20 && q.Quality <= 95 {
@@ -459,8 +501,20 @@ func (s *Server) applyQuality(q proto.QualityEvent) {
 	if q.Scale >= 0.25 && q.Scale <= 1 {
 		s.scale = q.Scale
 	}
+	quality, fps, scale := s.quality, s.fps, s.scale
+	cap := s.capturer
 	s.mu.Unlock()
+
+	// Push the settings into the backend too. Without this the pump paced frames
+	// at the new rate while the backend kept encoding at the old quality, so a
+	// client's quality slider appeared to do nothing.
+	if cap != nil {
+		capture.Apply(cap, quality, fps, scale)
+	}
 	s.restartPump()
+	// Report what is now in effect so every attached client shows the same
+	// values instead of drifting apart.
+	s.broadcastQuality(quality, fps, scale)
 }
 
 func (s *Server) clientCount() int {

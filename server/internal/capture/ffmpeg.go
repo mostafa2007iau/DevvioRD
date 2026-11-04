@@ -218,6 +218,36 @@ func (b *ffmpegBackend) restartLocked() {
 	_ = b.start()
 }
 
+// Tune applies live quality/fps/scale changes. Scale changes need a new ffmpeg
+// process (the filter graph is fixed at spawn), so the encoder restarts; a pure
+// quality/fps change also restarts, which is a sub-100 ms operation.
+func (b *ffmpegBackend) Tune(quality, fps int, scale float64) {
+	if quality < 20 || quality > 95 {
+		return
+	}
+	if fps < 1 || fps > 60 {
+		return
+	}
+	if scale < 0.25 || scale > 1 {
+		scale = 1
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.opts.Quality == quality && b.opts.FPS == fps && b.opts.Scale == scale {
+		return
+	}
+	b.opts.Quality, b.opts.FPS, b.opts.Scale = quality, fps, scale
+	// Recompute the output size for the new scale.
+	if b.width > 0 {
+		sw, sh, err := screenGeometry(b.display)
+		if err == nil {
+			b.width = int(float64(sw)*scale + 0.5)
+			b.height = int(float64(sh)*scale + 0.5)
+		}
+	}
+	b.restartLocked()
+}
+
 func (b *ffmpegBackend) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()

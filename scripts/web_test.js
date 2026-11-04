@@ -273,6 +273,82 @@ async function main() {
     () => window.document.querySelector('#qrBox svg') ? true : null, 5000);
   check('QR renders as inline SVG in the browser', !!qrRendered);
 
+  // ---- new UI: stats panel driven by /api/stats ----
+  api.toggleStats();
+  await sleep(1400);   // one stats poll
+  check('stats panel opened', api.state().statsOn === true);
+  const stFps = window.document.getElementById('stFps').textContent;
+  check('stats panel shows live fps', /\d+(\.\d+)? fps/.test(stFps), 'fps cell = ' + stFps);
+  const stGeo = window.document.getElementById('stGeo').textContent;
+  check('stats panel shows geometry', stGeo.indexOf('×') > 0, stGeo);
+  const stRtt = window.document.getElementById('stRtt').textContent;
+  check('stats panel shows latency', /ms|—/.test(stRtt), stRtt);
+  api.toggleStats();
+  check('stats panel closes', api.state().statsOn === false);
+
+  // ---- server telemetry endpoint ----
+  const statsResp = await fetch(BASE + '/api/stats', { headers: { 'X-DevvioRD-Token': TOKEN } });
+  const statsJson = await statsResp.json();
+  check('/api/stats responds', statsResp.ok);
+  check('/api/stats reports a live stream', statsJson.streaming === true &&
+    statsJson.clients >= 1, JSON.stringify({ streaming: statsJson.streaming, clients: statsJson.clients }));
+  check('/api/stats reports real fps', typeof statsJson.fps === 'number' && statsJson.fps > 0,
+    statsJson.fps + ' fps');
+  check('/api/stats reports throughput', typeof statsJson.kbps === 'number', statsJson.kbps + ' KiB/s');
+  check('/api/stats requires auth when a token is set',
+    (await fetch(BASE + '/api/stats')).status === 401);
+
+  // ---- new UI: quality menu, help sheet, session menu ----
+  window.document.getElementById('qualityBtn').click();
+  check('quality menu opens', !!window.document.getElementById('qualityMenu'));
+  const qBtns = window.document.querySelectorAll('#qualityMenu .btn');
+  check('quality menu offers presets', qBtns.length === 4, qBtns.length + ' presets');
+  qBtns[3].click();
+  await sleep(150);
+  check('quality preset applied', api.state() && window.document.getElementById('qualityMenu') === null);
+
+  window.document.getElementById('helpBtn').click();
+  check('help sheet opens', window.document.getElementById('help').classList.contains('open'));
+  window.document.getElementById('helpClose').click();
+  check('help sheet closes', !window.document.getElementById('help').classList.contains('open'));
+
+  window.document.getElementById('menuBtn').click();
+  check('session menu opens', !!window.document.getElementById('sessionMenu'));
+  const menuItems = window.document.querySelectorAll('#sessionMenu .btn');
+  check('session menu lists session actions', menuItems.length >= 6, menuItems.length + ' items');
+  window.document.getElementById('menuBtn').click();
+
+  // ---- new UI: keyboard shortcuts ----
+  function key(k, extra) {
+    const e = new window.Event('keydown', { bubbles: true, cancelable: true });
+    e.key = k;
+    if (extra) Object.keys(extra).forEach(function (n) { e[n] = extra[n]; });
+    window.document.dispatchEvent(e);
+  }
+  const modeBefore = api.state().mode;
+  key('m');
+  await sleep(120);
+  check('keyboard shortcut M toggles mouse mode', api.state().mode !== modeBefore,
+    modeBefore + ' -> ' + api.state().mode);
+  key('m');
+  await sleep(120);
+  check('keyboard shortcut M toggles back', api.state().mode === modeBefore);
+  key('i');
+  check('keyboard shortcut I opens stats', api.state().statsOn === true);
+  key('i'); key('?');
+  check('keyboard shortcut ? opens help', window.document.getElementById('help').classList.contains('open'));
+  key('Escape');
+  check('Escape closes the top overlay', !window.document.getElementById('help').classList.contains('open'));
+
+  // ---- new UI: file drawer opens and closes by button ----
+  window.document.getElementById('filesBtn').click();
+  check('files button opens the drawer', window.document.getElementById('drawer').classList.contains('open'));
+  window.document.getElementById('drawerClose').click();
+  check('drawer close button works', !window.document.getElementById('drawer').classList.contains('open'));
+
+  // ---- new UI: host field is persisted for the next visit ----
+  check('host field exists on the login card', !!window.document.getElementById('hostField'));
+
   // ---- reconnection state ---
   api.setMode('touch');
   check('final state consistent', api.state().connected === true);

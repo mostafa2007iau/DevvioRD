@@ -22,6 +22,7 @@ public final class Prefs {
     public static final String K_LAST_DIR = "lastDir";
     public static final String K_RECENT = "recent";
     public static final String K_STATS = "showStats";
+    public static final String K_BARS_PINNED = "barsPinned";
 
     private final SharedPreferences sp;
 
@@ -87,6 +88,27 @@ public final class Prefs {
         if (cur.isEmpty()) {
             return new String[0];
         }
-        return cur.split("\n");
+        // split() would return [""] for an empty string, so guard above; blank
+        // lines can still appear after a removal, so filter them out.
+        String[] raw = cur.split("\n");
+        int n = 0;
+        for (String r : raw) {
+            if (r != null && !r.trim().isEmpty()) {
+                n++;
+            }
+        }
+        String[] out = new String[n];
+        int i = 0;
+        for (String r : raw) {
+            if (r != null && !r.trim().isEmpty()) {
+                out[i++] = r.trim();
+            }
+        }
+        return out;
+    }
+
+    /** Forgets every stored host, leaving settings and the token untouched. */
+    public void clearRecents() {
+        putString(K_RECENT, "");
     }
 }

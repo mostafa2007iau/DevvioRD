@@ -94,6 +94,36 @@ func (b *syntheticBackend) Size() (int, int, error) {
 }
 func (b *syntheticBackend) Close() error { return nil }
 
+// Tune applies live quality/fps/scale changes without a restart. Quality takes
+// effect on the next encoded frame; scale reallocates the framebuffer only when
+// it really changed, so dragging a slider does not thrash memory.
+func (b *syntheticBackend) Tune(quality, fps int, scale float64) {
+	if quality < 20 || quality > 95 {
+		return
+	}
+	if fps < 1 || fps > 60 {
+		fps = b.fps
+	}
+	if scale < 0.25 || scale > 1 {
+		scale = 1
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.quality, b.fps = quality, fps
+	b.opts.Quality, b.opts.FPS, b.opts.Scale = quality, fps, scale
+
+	// Re-render the virtual desktop at the new size.
+	w := int(float64(1280)*scale + 0.5)
+	h := int(float64(800)*scale + 0.5)
+	w &^= 1
+	h &^= 1
+	if w > 0 && h > 0 && (w != b.w || h != b.h) {
+		b.w, b.h = w, h
+		b.fb = image.NewRGBA(image.Rect(0, 0, w, h))
+		b.base = renderWallpaper(w, h)
+	}
+}
+
 func (b *syntheticBackend) Capture() (Frame, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
