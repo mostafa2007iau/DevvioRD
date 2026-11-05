@@ -288,8 +288,14 @@ async function main() {
 
   // ---- server telemetry endpoint ----
   const statsResp = await fetch(BASE + '/api/stats', { headers: { 'X-DevvioRD-Token': TOKEN } });
-  const statsJson = await statsResp.json();
+  let statsJson = await statsResp.json();
   check('/api/stats responds', statsResp.ok);
+  // fps is measured over a window, so a probe that lands mid-window can read 0.
+  // Give it a moment and re-poll rather than asserting on a single sample.
+  if (!(statsJson.fps > 0)) {
+    await sleep(1200);
+    statsJson = await (await fetch(BASE + '/api/stats', { headers: { 'X-DevvioRD-Token': TOKEN } })).json();
+  }
   check('/api/stats reports a live stream', statsJson.streaming === true &&
     statsJson.clients >= 1, JSON.stringify({ streaming: statsJson.streaming, clients: statsJson.clients }));
   check('/api/stats reports real fps', typeof statsJson.fps === 'number' && statsJson.fps > 0,
@@ -365,10 +371,27 @@ async function main() {
   check('lowest preset is data friendly', presets[3].q <= 40 && presets[3].fps <= 10);
 
   // ---- link quality indicator ----
+  api.resetRtt();
   check('link quality starts empty', api.linkQuality().label === '');
   api.sampleRtt(12);
   const fast = api.linkQuality();
   check('fast link reads as healthy', fast.cls === 'on' && /ms/.test(fast.label), JSON.stringify(fast));
+  // Auto-downgrade: start from the sharpest preset and push bad samples in.
+  api.applyQualityPreset(85);
+  await sleep(60);
+  for (let i = 0; i < 6; i++) api.sampleRtt(420);
+  const slow = api.linkQuality();
+  check('slow link is called out', slow.cls === 'err' && /slow/.test(slow.label), JSON.stringify(slow));
+  check('weak link steps quality down exactly one level', api.state().quality === 70,
+    'quality=' + api.state().quality);
+  check('downgrade keeps fps and quality consistent',
+    api.presetFor(api.state().quality).fps === api.state().targetFps,
+    'fps=' + api.state().targetFps);
+  api.resetRtt();
+  // Restore a sane preset for the remaining checks.
+  window.document.getElementById('qualityBtn').click();
+  const restore = window.document.querySelector('#qualityMenu .btn');
+  if (restore) restore.click();
 
   // ---- hidden tab pauses the stream ----
   check('stream is not paused while visible', api.paused() === false);

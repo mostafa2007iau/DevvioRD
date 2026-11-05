@@ -153,8 +153,8 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o devviord.exe ./cmd/devviord
 
 ## ۵. تست
 
-همه تست‌ها روی همین ریپو اجرا شده‌اند: **۲۳۳ بررسی، همه سبز** (فاز ۱: ۲۰۳،
-فاز ۲: ۳۰ بررسی و تست جدید). جزئیات و روش اجرا در
+همه تست‌ها روی همین ریپو اجرا شده‌اند: **۲۷۶ بررسی، همه سبز** (فاز ۱: ۲۰۳،
+فاز ۲: ۷۳ بررسی و تست جدید). جزئیات و روش اجرا در
 [`docs/TEST-REPORT.md`](docs/TEST-REPORT.md)؛ باگ‌های پیدا‌شده و رفع‌شده در
 [`docs/BUGS.md`](docs/BUGS.md).
 
@@ -168,7 +168,7 @@ python3 scripts/integration_test.py --port 5900 --token secret123
 # انتقال فایل (آپلود/دانلود/امنیت مسیر)            → 20 check
 python3 scripts/files_test.py --port 5900 --token secret123
 
-# کلاینت وب در jsdom (ویدیو، کیفیت، تب مخفی، QR)   → 72 check
+# کلاینت وب در jsdom (ویدیو، کیفیت، تب مخفی، QR)   → 75 check
 node scripts/web_test.js --url http://127.0.0.1:5900 --token secret123
 
 # صحت QR با دیکودر مستقل (OpenCV)                  → 3 payload

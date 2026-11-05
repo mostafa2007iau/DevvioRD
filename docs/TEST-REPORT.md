@@ -17,10 +17,10 @@ Go 1.27.3 · Java 21 (jdk4py) · Node 20+
 | منطق اپ اندروید روی JVM | 94 | ✅ 0 failure | `python3 scripts/jvm_tests.py` |
 | پروتکل + استریم (WebSocket واقعی) | 21 | ✅ 0 failure | `python3 scripts/integration_test.py --port 5902 --token secret123` |
 | انتقال فایل (HTTP واقعی) | 20 | ✅ 0 failure | `python3 scripts/files_test.py --port 5902 --token secret123` |
-| کلاینت وب (jsdom) | 72 | ✅ 0 failure | `node scripts/web_test.js --url http://127.0.0.1:5902 --token secret123` |
+| کلاینت وب (jsdom) | 75 | ✅ 0 failure | `node scripts/web_test.js --url http://127.0.0.1:5902 --token secret123` |
 | صحت QR با دیکودر مستقل | 3 | ✅ 3/3 | `python3 scripts/qr_verify.py` |
 | ساختار فایل APK | 14 | ✅ 0 failure | `python3 scripts/verify_apk.py` |
-| **جمع** | **273** | **همه سبز** | |
+| **جمع** | **276** | **همه سبز** | |
 
 فاز ۲ سی بررسی جدید اضافه کرد (۳۳ تست JVM برای `Hosts`، ۳۶ تست وب برای آمار،
 پیش‌تنظیم‌ها، تب مخفی، میان‌برها و دیالوگ‌ها، و یک تست Go برای توقف هر‌نشست).
@@ -171,10 +171,14 @@ python3 scripts/verify_apk.py       # 14 passed, 0 failed
 مشخصات فایل نهایی:
 
 ```
-dist/DevvioRD-1.0.0.apk      66,347 bytes
-sha256                       1f76fcf87d0666d1bcccdc08791d9cc9490306daedfc1f8821dcf28fbd83077c
+dist/DevvioRD-1.0.0.apk      82,731 bytes   (فاز ۲: رابط بازطراحی‌شده)
+sha256                       f2805330b69d4e6a18b25c8a114e647e293a4eeddb9245337e7b9f798692d17b
 signature schemes            v1 + v2 + v3
 ```
+
+برای مقایسه، APK فاز ۱ ‏۶۶٬۳۴۷ بایت با
+`1f76fcf87d0666d1bcccdc08791d9cc9490306daedfc1f8821dcf28fbd83077c` بود؛ افزایش
+اندازه از بازنویسی صفحه‌ها و افزودن `Hosts.java` است.
 
 ---
 
@@ -252,7 +256,7 @@ signature schemes            v1 + v2 + v3
 | مجموعه | قبل | بعد | افزوده |
 | --- | ---: | ---: | --- |
 | JVM (`scripts/jvm_tests.py`) | 61 | 94 | ۳۳ تست `Hosts`: نرمال‌سازی آدرس، تشخیص پورت (شامل IPv6)، ساخت URL `ws`/`http`، تاریخچه اخیرها، نام‌گذاری بدون رونویسی |
-| وب (`scripts/web_test.js`) | 36 | 72 | آمار سرور و پنل، پیش‌تنظیم‌های کیفیت، نشانگر کیفیت اتصال، توقف/ادامه در تب مخفی، منوی کیفیت/نشست، راهنما، میان‌برهای `m`/`i`/`?`/`Esc`، کشوی فایل |
+| وب (`scripts/web_test.js`) | 36 | 75 | آمار سرور و پنل، پیش‌تنظیم‌های کیفیت، نشانگر کیفیت اتصال، توقف/ادامه در تب مخفی، منوی کیفیت/نشست، راهنما، میان‌برهای `m`/`i`/`?`/`Esc`، کشوی فایل |
 | Go (`server/internal/proto`, `server/internal/server`) | 48 | 49 | `TestPauseIsPerSession` و حضور `TypePause` در فضای نوع‌ها |
 
 ### ۱۱.۲ اجرای فاز ۲ (همه سبز)
@@ -263,7 +267,7 @@ Go -race      : go test ./... -race             → ۷ پکیج ok
 JVM           : 94 passed, 0 failed
 integration   : 21 passed, 0 failed   (پورت 5902، سرور ساخته‌شده از همین سورس)
 files         : 20 passed, 0 failed
-web (jsdom)   : 72 passed, 0 failed   (با توکن و بدون توکن، هر دو ۷۲/۷۲)
+web (jsdom)   : 75 passed, 0 failed   (با توکن و بدون توکن، هر دو ۷۵/۷۵)
 QR            : 3/3 payloads
 APK           : 14 passed, 0 failed
 ```

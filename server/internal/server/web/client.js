@@ -309,6 +309,9 @@
     connected = true;
     closing = false;
     retryCount = 0;
+    // Samples from the previous connection say nothing about this one.
+    rttHistory.length = 0;
+    weakStreak = 0;
     serverW = info.width || serverW;
     serverH = info.height || serverH;
     $('login').style.display = 'none';
@@ -1112,27 +1115,44 @@
     panel.id = 'sessionMenu';
     panel.style.cssText = 'position:absolute;right:10px;top:48px;z-index:24;background:var(--surface);' +
       'border:1px solid var(--line);border-radius:14px;padding:6px;box-shadow:var(--shadow);min-width:210px';
+    // Every item shows its shortcut on the right: the menu is where people
+    // discover that "M" switches modes, so hiding that would waste it.
     var items = [
-      ['⌨  Keyboard', function () { focusIme(); }],
-      ['📋  Send clipboard → host', function () { pushClipboard(); }],
-      ['📋  Copy host clipboard', function () { pullClipboard(); }],
-      ['🔁  Reconnect', function () { closing = false; connect(); }],
-      ['⛶  Fullscreen', toggleFullscreen],
-      ['⌘  Pair a phone', function () { showPair(true); }],
-      ['?  Shortcuts', function () { showHelp(true); }],
-      ['⏻  Disconnect', disconnect]
+      ['⌨', 'Keyboard', '', function () { focusIme(); }],
+      ['📋', 'Send clipboard → host', '', function () { pushClipboard(); }],
+      ['📋', 'Copy host clipboard', '', function () { pullClipboard(); }],
+      ['🔁', 'Reconnect', '', function () { closing = false; connect(); }],
+      ['⛶', 'Fullscreen', 'F11', toggleFullscreen],
+      ['⌘', 'Pair a phone', '', function () { showPair(true); }],
+      ['?', 'Shortcuts', '?', function () { showHelp(true); }],
+      ['⏻', 'Disconnect', '', disconnect]
     ];
     items.forEach(function (it) {
       var b = document.createElement('button');
       b.className = 'btn';
-      b.style.cssText = 'width:100%;justify-content:flex-start;margin:2px 0;padding:10px 12px';
-      b.textContent = it[0];
+      b.style.cssText = 'width:100%;justify-content:flex-start;gap:9px;margin:2px 0;padding:10px 12px';
+      var ico = document.createElement('span');
+      ico.textContent = it[0];
+      ico.style.cssText = 'width:16px;text-align:center;opacity:.9';
+      var label = document.createElement('span');
+      label.textContent = it[1];
+      label.style.cssText = 'flex:1;text-align:left';
+      b.appendChild(ico);
+      b.appendChild(label);
+      if (it[2]) {
+        var k = document.createElement('kbd');
+        k.textContent = it[2];
+        b.appendChild(k);
+      }
       b.addEventListener('click', function () {
-        panel.parentNode.removeChild(panel);
-        it[1]();
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+        it[3]();
       });
       panel.appendChild(b);
     });
+    // Destructive item last, in the danger colour.
+    var last = panel.lastChild;
+    if (last) last.style.color = 'var(--danger)';
     el.stage.appendChild(panel);
     setTimeout(function () {
       document.addEventListener('pointerdown', function close(ev) {
@@ -1384,7 +1404,8 @@
       state: function () {
         return {
           connected: connected, mode: mode, serverW: serverW, serverH: serverH,
-          fps: fpsValue, rtt: rtt, statsOn: statsOn, retryCount: retryCount
+          fps: fpsValue, rtt: rtt, statsOn: statsOn, retryCount: retryCount,
+          quality: quality, targetFps: fps
         };
       },
       imeChanged: imeChanged,
@@ -1395,7 +1416,10 @@
       // Feeds a synthetic round-trip sample through the same code path as a
       // real PONG, so the quality indicator can be exercised without a host.
       sampleRtt: sampleRtt,
+      resetRtt: function () { rttHistory.length = 0; weakStreak = 0; },
       presetFps: function () { return fps; },
+      presetFor: presetFor,
+      applyQualityPreset: applyQualityPreset,
       presets: function () { return PRESETS.slice(); },
       paused: function () { return paused; },
       loadFiles: loadFiles,
