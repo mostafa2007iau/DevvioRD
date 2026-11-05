@@ -295,8 +295,15 @@ async function main() {
   check('/api/stats reports real fps', typeof statsJson.fps === 'number' && statsJson.fps > 0,
     statsJson.fps + ' fps');
   check('/api/stats reports throughput', typeof statsJson.kbps === 'number', statsJson.kbps + ' KiB/s');
-  check('/api/stats requires auth when a token is set',
-    (await fetch(BASE + '/api/stats')).status === 401);
+  // Only meaningful against a token-protected server; a --no-auth instance
+  // (the public preview) must stay reachable, so skip instead of failing.
+  if (TOKEN) {
+    check('/api/stats requires auth when a token is set',
+      (await fetch(BASE + '/api/stats')).status === 401);
+  } else {
+    check('/api/stats is open when the server has no token',
+      (await fetch(BASE + '/api/stats')).ok, 'no-auth server');
+  }
 
   // ---- new UI: quality menu, help sheet, session menu ----
   window.document.getElementById('qualityBtn').click();
@@ -348,6 +355,37 @@ async function main() {
 
   // ---- new UI: host field is persisted for the next visit ----
   check('host field exists on the login card', !!window.document.getElementById('hostField'));
+
+  // ---- quality presets are one table shared by menu and auto-downgrade ----
+  const presets = api.presets();
+  check('four quality presets are exposed', presets.length === 4, JSON.stringify(presets));
+  check('presets descend in quality',
+    presets[0].q > presets[1].q && presets[1].q > presets[2].q && presets[2].q > presets[3].q);
+  check('presets pair fps with quality', presets.every(function (p) { return p.fps > 0 && p.label; }));
+  check('lowest preset is data friendly', presets[3].q <= 40 && presets[3].fps <= 10);
+
+  // ---- link quality indicator ----
+  check('link quality starts empty', api.linkQuality().label === '');
+  api.sampleRtt(12);
+  const fast = api.linkQuality();
+  check('fast link reads as healthy', fast.cls === 'on' && /ms/.test(fast.label), JSON.stringify(fast));
+
+  // ---- hidden tab pauses the stream ----
+  check('stream is not paused while visible', api.paused() === false);
+  const fpsBeforePause = api.presetFps();
+  Object.defineProperty(window.document, 'visibilityState', { value: 'hidden', configurable: true });
+  window.document.dispatchEvent(new window.Event('visibilitychange'));
+  await sleep(150);
+  check('hidden tab pauses the stream', api.paused() === true);
+  // Pausing is per-session in the protocol, so the shared fps must be untouched.
+  const resumedFps = api.presetFps();
+  check('pausing does not change the shared stream settings',
+    resumedFps === fpsBeforePause, 'fps ' + fpsBeforePause + ' -> ' + resumedFps);
+  Object.defineProperty(window.document, 'visibilityState', { value: 'visible', configurable: true });
+  window.document.dispatchEvent(new window.Event('visibilitychange'));
+  await sleep(150);
+  check('visible tab resumes the stream', api.paused() === false);
+  check('resumed stream restores the frame rate', api.presetFps() === resumedFps);
 
   // ---- reconnection state ---
   api.setMode('touch');

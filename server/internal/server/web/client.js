@@ -19,7 +19,7 @@
   // ------------------------------------------------------------ protocol
   var T = {
     HELLO: 0x01, TOUCH: 0x10, SCROLL: 0x11, KEY: 0x14, TEXT: 0x15,
-    CLIPBOARD: 0x20, POINTER_MODE: 0x21, PING: 0x40, QUALITY: 0x41,
+    CLIPBOARD: 0x20, POINTER_MODE: 0x21, PING: 0x40, QUALITY: 0x41, PAUSE: 0x42,
     HELLO_OK: 0x81, FRAME: 0x90, CURSOR: 0x92, CLIP: 0xA0, STATUS: 0xB0,
     SCREEN: 0xC0, PONG: 0xC1, ERROR: 0xEE
   };
@@ -353,6 +353,80 @@
 
   var serverStats = { fps: 0, clients: 0, kbps: 0, lastFrameAge: -1, streaming: false };
 
+  // Latency history (last 20 samples) drives the connection-quality indicator.
+  var rttHistory = [];
+  var weakStreak = 0;
+  var lastAutoDowngrade = 0;
+  var paused = false;
+
+  /**
+   * Connection quality from the last few RTT samples. Returns
+   * {label, cls} so the status pill can read like a signal meter:
+   * "connected · 12 ms" is far more useful mid-session than "connected".
+   */
+  function linkQuality() {
+    if (rttHistory.length === 0) return { label: '', cls: '' };
+    var sum = 0, worst = 0;
+    for (var i = 0; i < rttHistory.length; i++) {
+      sum += rttHistory[i];
+      if (rttHistory[i] > worst) worst = rttHistory[i];
+    }
+    var avg = sum / rttHistory.length;
+    if (avg < 60 && worst < 160) return { label: Math.round(avg) + ' ms', cls: 'on' };
+    if (avg < 180 && worst < 450) return { label: Math.round(avg) + ' ms', cls: 'warn' };
+    return { label: Math.round(avg) + ' ms — slow', cls: 'err' };
+  }
+
+  function sampleRtt(ms) {
+    if (!(ms >= 0) || ms > 60000) return;
+    rttHistory.push(ms);
+    if (rttHistory.length > 20) rttHistory.shift();
+    maybeAutoDowngrade();
+  }
+
+  /**
+   * On a genuinely poor link, step the stream down once instead of letting the
+   * user stare at a slideshow. Only ever lowers quality, only when it has to,
+   * at most once every 20 s, and it tells the user what it did and how to undo
+   * it - a silent change in image quality looks like a bug.
+   */
+  function maybeAutoDowngrade() {
+    if (!connected || QUALITY_ORDER.length < 2) return;
+    var idx = QUALITY_ORDER.indexOf(quality);
+    if (idx < 0 || idx === QUALITY_ORDER.length - 1) return;
+    var now = Date.now();
+    var poor = rttHistory.length >= 5 && rttHistory[rttHistory.length - 1] > 350;
+    if (!poor) { weakStreak = 0; return; }
+    weakStreak++;
+    if (weakStreak < 3 || now - lastAutoDowngrade < 20000) return;
+    weakStreak = 0;
+    lastAutoDowngrade = now;
+    var next = presetFor(QUALITY_ORDER[idx + 1]);
+    applyQualityPreset(next.q);
+    toast('Weak connection — lowered quality to ' + next.label + ' (change it in ⚙)', 'warn');
+  }
+
+  /**
+   * A background tab still receives every frame and burns battery decoding
+   * them, so stop asking the host for frames while hidden and resume on return.
+   * The socket stays open, so coming back is instant.
+   */
+  function bindVisibility() {
+    document.addEventListener('visibilitychange', function () {
+      var hidden = document.visibilityState === 'hidden';
+      if (hidden === paused) return;
+      paused = hidden;
+      if (!connected || !ws) return;
+      ws.send(jsonMsg(T.PAUSE, { paused: hidden }));
+      if (!hidden) {
+        // Frames that queued while hidden are stale; drop the backlog and ask
+        // for a fresh sample so the picture is current the moment we return.
+        pendingFrame = null;
+        ws.send(pingMsg(Date.now()));
+      }
+    });
+  }
+
   function refreshServerStats() {
     api('/api/stats').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
       if (d) serverStats = d;
@@ -426,6 +500,10 @@
           var ms = Number(dv2.getBigInt64 ? dv2.getBigInt64(1, false)
             : dv2.getUint32(1, false) * 4294967296 + dv2.getUint32(5, false));
           rtt = Date.now() - ms;
+          sampleRtt(rtt);
+          var lq = linkQuality();
+          if (lq.label) setStatus('connected · ' + lq.label, lq.cls);
+          document.dispatchEvent(new CustomEvent('devviord:rtt', { detail: { rtt: rtt } }));
         } catch (e) { /* ignore */ }
         break;
       case T.POINTER_MODE:
@@ -1097,6 +1175,38 @@
     }).catch(function (e) { toast('Failed: ' + e.message, 'bad'); });
   }
 
+  // Single source of truth for presets: the menu, the keyboard shortcut and
+  // the automatic downgrade all read this, so they can never disagree.
+  var PRESETS = [
+    { label: 'Sharp', q: 85, fps: 30 },
+    { label: 'Balanced', q: 70, fps: 20 },
+    { label: 'Data saver', q: 55, fps: 15 },
+    { label: 'Low bandwidth', q: 40, fps: 10 }
+  ];
+  var QUALITY_ORDER = PRESETS.map(function (p) { return p.q; });
+
+  function presetFor(q) {
+    for (var i = 0; i < PRESETS.length; i++) {
+      if (PRESETS[i].q === q) return PRESETS[i];
+    }
+    return null;
+  }
+
+  /** Applies a preset (or an arbitrary slider value) and tells the host. */
+  function applyQualityPreset(q) {
+    var p = presetFor(q);
+    quality = p ? p.q : q;
+    fps = p ? p.fps : fps;
+    store(Q_KEY, quality);
+    store(FPS_KEY, fps);
+    // Keep the connect-screen slider in step when it is on screen.
+    if ($('quality')) $('quality').value = quality;
+    if ($('fps')) $('fps').value = fps;
+    if (typeof syncQualityLabels === 'function') syncQualityLabels();
+    if (connected && ws) ws.send(qualityMsg(quality, fps, 0));
+    return p;
+  }
+
   function showQualityMenu() {
     var panel = document.getElementById('qualityMenu');
     if (panel) { panel.parentNode.removeChild(panel); return; }
@@ -1106,22 +1216,19 @@
       'border:1px solid var(--line);border-radius:14px;padding:10px;box-shadow:var(--shadow);width:250px';
     panel.innerHTML = '<div style="font-size:11px;color:var(--dim);font-weight:700;' +
       'letter-spacing:.06em;margin-bottom:4px">STREAM QUALITY</div>';
-    [['Sharp', 85, 30], ['Balanced', 70, 20], ['Data saver', 55, 15], ['Low bandwidth', 40, 10]]
-      .forEach(function (p) {
-        var b = document.createElement('button');
-        b.className = 'btn' + (quality === p[1] ? ' active' : '');
-        b.style.cssText = 'width:100%;justify-content:space-between;margin:2px 0;padding:10px 12px';
-        b.innerHTML = '<span>' + p[0] + '</span><span style="color:var(--dim);font-size:11px">q' +
-          p[1] + ' · ' + p[2] + 'fps</span>';
-        b.addEventListener('click', function () {
-          quality = p[1]; fps = p[2];
-          store(Q_KEY, quality); store(FPS_KEY, fps);
-          if (connected) ws.send(qualityMsg(quality, fps, 0));
-          panel.parentNode.removeChild(panel);
-          toast('Quality: ' + p[0] + ' (q' + quality + ', ' + fps + ' fps)', 'good');
-        });
-        panel.appendChild(b);
+    PRESETS.forEach(function (p) {
+      var b = document.createElement('button');
+      b.className = 'btn' + (quality === p.q ? ' active' : '');
+      b.style.cssText = 'width:100%;justify-content:space-between;margin:2px 0;padding:10px 12px';
+      b.innerHTML = '<span>' + p.label + '</span><span style="color:var(--dim);font-size:11px">q' +
+        p.q + ' · ' + p.fps + 'fps</span>';
+      b.addEventListener('click', function () {
+        applyQualityPreset(p.q);
+        if (panel.parentNode) panel.parentNode.removeChild(panel);
+        toast('Quality: ' + p.label + ' (q' + quality + ', ' + fps + ' fps)', 'good');
       });
+      panel.appendChild(b);
+    });
     el.stage.appendChild(panel);
     setTimeout(function () {
       document.addEventListener('pointerdown', function close(ev) {
@@ -1242,6 +1349,7 @@
 
     bindPointer();
     bindKeyboard();
+    bindVisibility();
     wireToolbar();
     wireLogin();
 
@@ -1283,6 +1391,13 @@
       isReady: function () { return initialized; },
       setImeSent: function (v) { imeSent = v; },
       connect: connect,
+      linkQuality: linkQuality,
+      // Feeds a synthetic round-trip sample through the same code path as a
+      // real PONG, so the quality indicator can be exercised without a host.
+      sampleRtt: sampleRtt,
+      presetFps: function () { return fps; },
+      presets: function () { return PRESETS.slice(); },
+      paused: function () { return paused; },
       loadFiles: loadFiles,
       setMode: setMode,
       toggleStats: toggleStats,

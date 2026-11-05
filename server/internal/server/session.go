@@ -318,6 +318,17 @@ func (s *session) handleMessage(b []byte) error {
 		// mouse mode fight over the same desktop.
 		s.srv.broadcastPointerMode(p.Mode)
 		return nil
+	case proto.TypePause:
+		var pe proto.PauseEvent
+		if err := json.Unmarshal(body, &pe); err != nil {
+			return err
+		}
+		// Per-session only: pausing one client must never throttle the others.
+		s.realtime.Store(!pe.Paused)
+		if s.srv.cfg.Verbose {
+			log.Printf("ws: client #%d paused=%v", s.id, pe.Paused)
+		}
+		return nil
 	case proto.TypeQuality:
 		var q proto.QualityEvent
 		if err := json.Unmarshal(body, &q); err != nil {

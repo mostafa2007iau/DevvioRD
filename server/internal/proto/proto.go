@@ -33,6 +33,7 @@ const (
 	TypePointerMode byte = 0x21 // JSON PointerModeEvent
 	TypePing        byte = 0x40 // fixed int64 nanos
 	TypeQuality     byte = 0x41 // JSON QualityEvent
+	TypePause       byte = 0x42 // JSON PauseEvent (client wants no frames: hidden tab)
 
 	// --- server -> client ---
 	TypeHelloOK  byte = 0x81 // JSON HelloOKMsg
@@ -231,6 +232,13 @@ type QualityEvent struct {
 	Scale   float64 `json:"scale,omitempty"`   // 0.25..1.0
 }
 
+// PauseEvent asks the server to stop sending frames to *this* session only.
+// A background tab uses it so it stops decoding video it cannot show, without
+// touching the stream settings every other client shares.
+type PauseEvent struct {
+	Paused bool `json:"paused"`
+}
+
 // CursorMsg reports the server cursor position (normalized) in mouse mode.
 type CursorMsg struct {
 	X       float32 `json:"x"`
@@ -346,6 +354,8 @@ func TypeName(t byte) string {
 		return "ping"
 	case TypeQuality:
 		return "quality"
+	case TypePause:
+		return "pause"
 	case TypeHelloOK:
 		return "hello-ok"
 	case TypeFrame:

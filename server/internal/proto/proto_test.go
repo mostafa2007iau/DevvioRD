@@ -156,7 +156,7 @@ func TestMessageTypeSpaceIsDisjoint(t *testing.T) {
 	// The protocol relies on <0x80 = client->server and >=0x80 = server->client
 	// so that a stray mirrored message is detectable.
 	client := []byte{TypeHello, TypeTouch, TypeScroll, TypeKey, TypeText,
-		TypeClipboard, TypePointerMode, TypePing, TypeQuality}
+		TypeClipboard, TypePointerMode, TypePing, TypeQuality, TypePause}
 	server := []byte{TypeHelloOK, TypeFrame, TypeCursor, TypeClip, TypeStatus,
 		TypeScreen, TypePong, TypeFileMeta, TypeError}
 	seen := map[byte]string{}
