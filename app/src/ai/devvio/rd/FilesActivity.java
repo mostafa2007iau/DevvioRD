@@ -240,6 +240,7 @@ public class FilesActivity extends Activity {
             showEmpty("📡", "اتصال برقرار نشد",
                     "آدرس و توکن را بررسی کنید و دوباره تلاش کنید.");
             statusLabel.setText("خطای شبکه · " + base);
+            addRootFallback(dir);
             return;
         }
         try {
@@ -253,6 +254,7 @@ public class FilesActivity extends Activity {
         } catch (Exception e) {
             countLabel.setText("خطا");
             showEmpty("⚠", "پاسخ نامعتبر از سرور", "نسخه سرور و اپ را بررسی کنید.");
+            addRootFallback(dir);
             return;
         }
 
@@ -304,6 +306,29 @@ public class FilesActivity extends Activity {
         Ui.addGap(emptyBox, s, this, Ui.SP_2);
         emptyBox.setVisibility(View.VISIBLE);
         listScroll.setVisibility(View.GONE);
+    }
+
+    /**
+     * Adds a "back to the share root" action to the current empty state when we
+     * are stuck inside a folder that cannot be read. Without it, a bad server
+     * path leaves the screen with no way forward.
+     */
+    private void addRootFallback(final String failedDir) {
+        if (failedDir == null || failedDir.isEmpty()) {
+            return;
+        }
+        TextView back = Ui.secondaryButton(this, "بازگشت به پوشه اصلی");
+        back.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                cwd = "";
+                refresh();
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Ui.dp(this, Ui.SP_4);
+        emptyBox.addView(back, lp);
     }
 
     private void hideEmpty() {
@@ -826,8 +851,14 @@ public class FilesActivity extends Activity {
     // ------------------------------------------------------------- plumbing
 
     /**
-     * Asks the server for its file root; when the root is the default
-     * "DevvioRD/Downloads" folder we jump straight into it.
+     * Picks the folder to open first.
+     *
+     * <p>Earlier this jumped to "Downloads" whenever the reported root path
+     * contained "DevvioRD" - which it always does, because that is the product
+     * name - so on a server whose root has no Downloads folder the screen
+     * opened a directory that does not exist and dead-ended on "invalid
+     * server response". Now the listing itself decides: we descend only into a
+     * directory that is actually there, otherwise we stay at the root.
      */
     private void probeSharedDir() {
         statusLabel.setText("در حال اتصال…");
@@ -835,27 +866,39 @@ public class FilesActivity extends Activity {
             @Override
             public void run() {
                 final String body = Http.text(base + "/api/files?dir=", token);
+                final String start = preferredStartDir(body);
                 ui.post(new Runnable() {
                     @Override
                     public void run() {
-                        String start = "";
-                        if (body != null) {
-                            try {
-                                JSONObject o = new JSONObject(body);
-                                String root = o.optString("root");
-                                if (root != null && root.contains("DevvioRD")) {
-                                    start = "Downloads";
-                                }
-                            } catch (Exception ignored) {
-                                // stay at the root
-                            }
-                        }
                         cwd = start;
                         refresh();
                     }
                 });
             }
         }).start();
+    }
+
+    /** The sub-folder to open, given a root listing; "" when none applies. */
+    private static String preferredStartDir(String rootListing) {
+        if (rootListing == null) {
+            return "";
+        }
+        try {
+            JSONObject o = new JSONObject(rootListing);
+            JSONArray arr = o.optJSONArray("entries");
+            if (arr == null) {
+                return "";
+            }
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject e = arr.getJSONObject(i);
+                if (e.optBoolean("dir") && "downloads".equalsIgnoreCase(e.optString("name"))) {
+                    return e.optString("path", "Downloads");
+                }
+            }
+        } catch (Exception ignored) {
+            // unreadable listing: the root is always a safe place to be
+        }
+        return "";
     }
 
     private static String restBase(String host) {

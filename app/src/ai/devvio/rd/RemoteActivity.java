@@ -82,13 +82,13 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private float lastTapX;
     private float lastTapY;
     private boolean twoFinger;
-    private float scrollAccum;
     // Two-finger scrolling keeps its own last position; sharing lastTapX/lastTapY
     // with the double-tap detector made the first scroll jump and could turn a
     // scroll into a stray double click on the host.
     private float scrollLastX = -1;
     private float scrollLastY = -1;
     private float pointerX = 0.5f;
+    private boolean ignoredPress;
     private float pointerY = 0.5f;
 
     // IME bridge
@@ -113,8 +113,6 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
     private int retryCount;
     private boolean barsVisible = true;
     private boolean barsPinned;
-    private long lastBarsToggleAt;
-    private int framesSinceTick;
     private long lastFpsTickAt;
     private long lastTickFrames;
     private double fpsNow;
@@ -491,7 +489,6 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
 
     private void toggleBars() {
         barsVisible = !barsVisible;
-        lastBarsToggleAt = System.currentTimeMillis();
         applyBarsVisibility(true);
         showHud(barsVisible ? "نوارها نمایش داده شدند" : "حالت تمام‌صفحه · برای بازگشت دو ضربه بزنید");
     }
@@ -1006,6 +1003,19 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
             return;
         }
         int action = e.getActionMasked();
+        // A press in the letterbox margin is not a press on the desktop. Sending
+        // it anyway (clamped to the nearest edge) clicked whatever happened to be
+        // at that edge of the remote screen.
+        if (action == MotionEvent.ACTION_DOWN && remoteView.isOutsideImage(e.getX(), e.getY())) {
+            ignoredPress = true;
+            return;
+        }
+        if (ignoredPress) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                ignoredPress = false;
+            }
+            return;
+        }
         switch (action) {
             case MotionEvent.ACTION_DOWN:
                 twoFinger = false;
@@ -1014,7 +1024,6 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
                 lastX = downX;
                 lastY = downY;
                 dragging = false;
-                scrollAccum = 0;
                 if (Proto.MODE_TOUCH.equals(pointerMode)) {
                     sendTouch(Proto.TOUCH_DOWN, normX(downX), normY(downY), 1f);
                 } else {
@@ -1103,10 +1112,9 @@ public class RemoteActivity extends Activity implements WsClient.Listener {
         if (Math.abs(dx) < 1.5f && Math.abs(dy) < 1.5f) {
             return;
         }
-        // Accumulate sub-pixel movement instead of dropping it, so slow
-        // drags still scroll smoothly instead of stuttering.
+        // Send the delta as-is: the threshold above already filters jitter, and
+        // a dead "accumulator" here used to be incremented and never read.
         float scale = Ui.dp(this, 480);
-        scrollAccum += Math.abs(dy);
         ws.send(Proto.scroll(dx / scale, dy / scale));
     }
 
