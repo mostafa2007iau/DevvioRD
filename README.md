@@ -153,13 +153,13 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o devviord.exe ./cmd/devviord
 
 ## ۵. تست
 
-همه تست‌ها روی همین ریپو اجرا شده‌اند: **۲۷۶ بررسی، همه سبز** (فاز ۱: ۲۰۳،
-فاز ۲: ۷۳ بررسی و تست جدید). جزئیات و روش اجرا در
+همه تست‌ها روی همین ریپو اجرا شده‌اند: **۲۸۵ بررسی، همه سبز** (فاز ۱: ۲۰۳،
+فاز ۲: ۸۲ بررسی و تست جدید). جزئیات و روش اجرا در
 [`docs/TEST-REPORT.md`](docs/TEST-REPORT.md)؛ باگ‌های پیدا‌شده و رفع‌شده در
 [`docs/BUGS.md`](docs/BUGS.md).
 
 ```bash
-# منطق اپ اندروید روی JVM (پروتکل + IME + آدرس‌ها)   → 94 check
+# منطق اپ اندروید روی JVM (پروتکل + IME + آدرس‌ها)   → 103 check
 python3 scripts/jvm_tests.py
 
 # پروتکل و استریم و ورودی و کلیپ‌بورد (WebSocket)   → 21 check

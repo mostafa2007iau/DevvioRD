@@ -14,13 +14,13 @@ Go 1.27.3 · Java 21 (jdk4py) · Node 20+
 | --- | ---: | --- | --- |
 | Go unit / integration (سرور) | 49 | ✅ 0 failure | `cd server && go test ./...` |
 | Go با race detector | 7 پکیج | ✅ پاک | `cd server && go test ./... -race` |
-| منطق اپ اندروید روی JVM | 94 | ✅ 0 failure | `python3 scripts/jvm_tests.py` |
+| منطق اپ اندروید روی JVM | 103 | ✅ 0 failure | `python3 scripts/jvm_tests.py` |
 | پروتکل + استریم (WebSocket واقعی) | 21 | ✅ 0 failure | `python3 scripts/integration_test.py --port 5902 --token secret123` |
 | انتقال فایل (HTTP واقعی) | 20 | ✅ 0 failure | `python3 scripts/files_test.py --port 5902 --token secret123` |
 | کلاینت وب (jsdom) | 75 | ✅ 0 failure | `node scripts/web_test.js --url http://127.0.0.1:5902 --token secret123` |
 | صحت QR با دیکودر مستقل | 3 | ✅ 3/3 | `python3 scripts/qr_verify.py` |
 | ساختار فایل APK | 14 | ✅ 0 failure | `python3 scripts/verify_apk.py` |
-| **جمع** | **276** | **همه سبز** | |
+| **جمع** | **285** | **همه سبز** | |
 
 فاز ۲ سی بررسی جدید اضافه کرد (۳۳ تست JVM برای `Hosts`، ۳۶ تست وب برای آمار،
 پیش‌تنظیم‌ها، تب مخفی، میان‌برها و دیالوگ‌ها، و یک تست Go برای توقف هر‌نشست).
@@ -255,7 +255,7 @@ signature schemes            v1 + v2 + v3
 
 | مجموعه | قبل | بعد | افزوده |
 | --- | ---: | ---: | --- |
-| JVM (`scripts/jvm_tests.py`) | 61 | 94 | ۳۳ تست `Hosts`: نرمال‌سازی آدرس، تشخیص پورت (شامل IPv6)، ساخت URL `ws`/`http`، تاریخچه اخیرها، نام‌گذاری بدون رونویسی |
+| JVM (`scripts/jvm_tests.py`) | 61 | 103 | ۴۲ تست `Hosts`: نرمال‌سازی آدرس، تشخیص پورت (شامل IPv6)، ساخت URL `ws`/`http`، تاریخچه اخیرها، نام‌گذاری بدون رونویسی |
 | وب (`scripts/web_test.js`) | 36 | 75 | آمار سرور و پنل، پیش‌تنظیم‌های کیفیت، نشانگر کیفیت اتصال، توقف/ادامه در تب مخفی، منوی کیفیت/نشست، راهنما، میان‌برهای `m`/`i`/`?`/`Esc`، کشوی فایل |
 | Go (`server/internal/proto`, `server/internal/server`) | 48 | 49 | `TestPauseIsPerSession` و حضور `TypePause` در فضای نوع‌ها |
 
@@ -264,7 +264,7 @@ signature schemes            v1 + v2 + v3
 ```
 Go            : go vet ./... پاک · go test ./...  → ۷ پکیج ok · ۴۹ تست
 Go -race      : go test ./... -race             → ۷ پکیج ok
-JVM           : 94 passed, 0 failed
+JVM           : 103 passed, 0 failed
 integration   : 21 passed, 0 failed   (پورت 5902، سرور ساخته‌شده از همین سورس)
 files         : 20 passed, 0 failed   (دو بررسی احراز هویت: روی سرور دارای توکن
                 «۴۰۱ برای درخواست بدون/با توکن غلط» و روی سرور بدون توکن «دسترسی

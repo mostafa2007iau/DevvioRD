@@ -238,6 +238,21 @@ public class Tests {
     }
 
     static void hostTests() throws Exception {
+        // Guard: every helper the other screens rely on must exist with the
+        // exact signature. A rename here compiles the app but breaks a screen
+        // at runtime, so assert the surface explicitly.
+        String[] required = {"normalize", "hasPort", "withPort", "httpBase", "wsUrl",
+            "isSecure", "parseRecents", "pushRecent", "uniqueName"};
+        for (String m : required) {
+            boolean found = false;
+            for (Method mm : Hosts.class.getDeclaredMethods()) {
+                if (mm.getName().equals(m) && java.lang.reflect.Modifier.isStatic(mm.getModifiers())) {
+                    found = true;
+                    break;
+                }
+            }
+            check("Hosts." + m + " is available", found);
+        }
         // --- normalisation: the shapes users actually paste ---
         eq("plain host unchanged", Hosts.normalize("192.168.1.10:5900"), "192.168.1.10:5900");
         eq("ws scheme stripped", Hosts.normalize("ws://192.168.1.10:5900/ws"), "192.168.1.10:5900");
