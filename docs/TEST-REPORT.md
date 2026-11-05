@@ -3,7 +3,8 @@
 Test report for the DevvioRD 1.0.0 release. Every number below comes from a run on
 the code in this repository against the binaries in `dist/`.
 
-تاریخ اجرا: ۲۰۲۶‑۱۱‑۰۴ · پلتفرم: linux/amd64 · Go 1.27.3 · Java 21 (jdk4py) · Node 20+
+تاریخ اجرا: ۲۰۲۶‑۱۱‑۰۴ (فاز ۱) و ۲۰۲۶‑۱۱‑۰۵ (فاز ۲) · پلتفرم: linux/amd64 ·
+Go 1.27.3 · Java 21 (jdk4py) · Node 20+
 
 ---
 
@@ -11,15 +12,19 @@ the code in this repository against the binaries in `dist/`.
 
 | مجموعه | تعداد | نتیجه | دستور |
 | --- | ---: | --- | --- |
-| Go unit / integration (سرور) | 48 | ✅ 0 failure | `cd server && go test ./...` |
+| Go unit / integration (سرور) | 49 | ✅ 0 failure | `cd server && go test ./...` |
 | Go با race detector | 7 پکیج | ✅ پاک | `cd server && go test ./... -race` |
-| منطق اپ اندروید روی JVM | 61 | ✅ 0 failure | `python3 scripts/jvm_tests.py` |
-| پروتکل + استریم (WebSocket واقعی) | 21 | ✅ 0 failure | `python3 scripts/integration_test.py --token secret123` |
-| انتقال فایل (HTTP واقعی) | 20 | ✅ 0 failure | `python3 scripts/files_test.py --token secret123` |
-| کلاینت وب (jsdom) | 36 | ✅ 0 failure | `node scripts/web_test.js --token secret123` |
+| منطق اپ اندروید روی JVM | 94 | ✅ 0 failure | `python3 scripts/jvm_tests.py` |
+| پروتکل + استریم (WebSocket واقعی) | 21 | ✅ 0 failure | `python3 scripts/integration_test.py --port 5902 --token secret123` |
+| انتقال فایل (HTTP واقعی) | 20 | ✅ 0 failure | `python3 scripts/files_test.py --port 5902 --token secret123` |
+| کلاینت وب (jsdom) | 72 | ✅ 0 failure | `node scripts/web_test.js --url http://127.0.0.1:5902 --token secret123` |
 | صحت QR با دیکودر مستقل | 3 | ✅ 3/3 | `python3 scripts/qr_verify.py` |
 | ساختار فایل APK | 14 | ✅ 0 failure | `python3 scripts/verify_apk.py` |
-| **جمع** | **203** | **همه سبز** | |
+| **جمع** | **273** | **همه سبز** | |
+
+فاز ۲ سی بررسی جدید اضافه کرد (۳۳ تست JVM برای `Hosts`، ۳۶ تست وب برای آمار،
+پیش‌تنظیم‌ها، تب مخفی، میان‌برها و دیالوگ‌ها، و یک تست Go برای توقف هر‌نشست).
+جدول کامل باگ‌های پیدا و رفع‌شده در [`BUGS.md`](BUGS.md) است.
 
 علاوه بر این‌ها، چهار بررسی دستی/تصویری هم انجام شده که در بخش «بررسی‌های دستی» آمده است.
 
@@ -233,3 +238,51 @@ signature schemes            v1 + v2 + v3
 
 مسیرهای `desktop` (ffmpeg/x11) و `clipboard` سیستمی با همان کد و همان تست‌های
 پروتکل کار می‌کنند، اما در این محیط اجرای واقعی‌شان ممکن نبود.
+
+---
+
+## ۱۱. فاز ۲ — بازبینی، رفع باگ و بازطراحی رابط
+
+پس از فاز ۱ کل پروژه دوباره بازبینی شد: هر صفحه اپ اندروید بازنویسی و هر مسیر
+کلاینت وب مرور شد. جزئیات باگ‌ها در [`BUGS.md`](BUGS.md) و طراحی در
+[`UI.md`](UI.md) آمده است. این بخش فقط شواهد تست را ثبت می‌کند.
+
+### ۱۱.۱ چه چیزی به تست‌ها اضافه شد
+
+| مجموعه | قبل | بعد | افزوده |
+| --- | ---: | ---: | --- |
+| JVM (`scripts/jvm_tests.py`) | 61 | 94 | ۳۳ تست `Hosts`: نرمال‌سازی آدرس، تشخیص پورت (شامل IPv6)، ساخت URL `ws`/`http`، تاریخچه اخیرها، نام‌گذاری بدون رونویسی |
+| وب (`scripts/web_test.js`) | 36 | 72 | آمار سرور و پنل، پیش‌تنظیم‌های کیفیت، نشانگر کیفیت اتصال، توقف/ادامه در تب مخفی، منوی کیفیت/نشست، راهنما، میان‌برهای `m`/`i`/`?`/`Esc`، کشوی فایل |
+| Go (`server/internal/proto`, `server/internal/server`) | 48 | 49 | `TestPauseIsPerSession` و حضور `TypePause` در فضای نوع‌ها |
+
+### ۱۱.۲ اجرای فاز ۲ (همه سبز)
+
+```
+Go            : go vet ./... پاک · go test ./...  → ۷ پکیج ok · ۴۹ تست
+Go -race      : go test ./... -race             → ۷ پکیج ok
+JVM           : 94 passed, 0 failed
+integration   : 21 passed, 0 failed   (پورت 5902، سرور ساخته‌شده از همین سورس)
+files         : 20 passed, 0 failed
+web (jsdom)   : 72 passed, 0 failed   (با توکن و بدون توکن، هر دو ۷۲/۷۲)
+QR            : 3/3 payloads
+APK           : 14 passed, 0 failed
+```
+
+### ۱۱.۳ باگ‌هایی که همان لحظه با تست جدید گرفته شد
+
+- `Hosts.httpBase` برای میزبان `wss://` آدرس `http://` می‌ساخت — تست
+  `secure http base` قرمز شد و رفع شد.
+- اولین پیاده‌سازی «توقف در تب مخفی» از پیام کیفیت سراسری استفاده می‌کرد و
+  نرخ فریم همه کلاینت‌ها را به ۱ می‌رساند — تست وب گرفت و با پیام جدید
+  `TypePause` جایگزین شد.
+- تست `paintStats` نشان داد پنل آمار `0 fps` می‌دهد در حالی که استریم ۲۰ fps
+  بود؛ اولویت به نرخ دیکود مرورگر تغییر کرد.
+
+### ۱۱.۴ آنچه با تست خودکار قابل پوشش نبود
+
+اپ اندروید روی دستگاه واقعی اجرا نشده است: در این محیط امولاتور و UIAutomator
+در دسترس نیست. اعتبارسنجی اپ شامل کامپایل کامل با `ecj`، ساخت و امضای APK،
+بررسی ساختار APK (۱۴ بررسی) و ۹۴ تست منطق خالص جاوا روی JVM است. رفتارهای
+نیازمند دستگاه (لمس واقعی، چرخش صفحه، دوربین/اسکنر QR، کلیپ‌بورد سیستم) با
+بازبینی کد و پوشش منطقی بررسی شده‌اند و در `BUGS.md` صریحاً به‌عنوان محدودیت
+ذکر شده‌اند.

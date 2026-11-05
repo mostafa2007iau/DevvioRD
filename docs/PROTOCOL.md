@@ -59,7 +59,8 @@ Any message other than `PING` before `HELLO` is ignored and drops the session.
 | `0x20` | CLIPBOARD | `{"kind":"text","data":"..."}` |
 | `0x21` | POINTER_MODE | `{"mode":"touch"}` or `{"mode":"mouse"}` |
 | `0x40` | PING | `int64` client millis |
-| `0x41` | QUALITY | `{"quality":70,"fps":20,"scale":1.0}` (all optional) |
+| `0x41` | QUALITY | `{"quality":70,"fps":20,"scale":1.0}` (all optional, **global**) |
+| `0x42` | PAUSE | `{"paused":true}` — stop/resume frames for **this session only** (background tab) |
 
 ### Server → client
 
