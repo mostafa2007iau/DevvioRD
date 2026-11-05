@@ -153,8 +153,8 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o devviord.exe ./cmd/devviord
 
 ## ۵. تست
 
-همه تست‌ها روی همین ریپو اجرا شده‌اند: **۲۸۵ بررسی، همه سبز** (فاز ۱: ۲۰۳،
-فاز ۲: ۸۲ بررسی و تست جدید). جزئیات و روش اجرا در
+همه تست‌ها روی همین ریپو اجرا شده‌اند: **۲۸۸ بررسی، همه سبز** (فاز ۱: ۲۰۳،
+فاز ۲: ۸۵ بررسی و تست جدید). جزئیات و روش اجرا در
 [`docs/TEST-REPORT.md`](docs/TEST-REPORT.md)؛ باگ‌های پیدا‌شده و رفع‌شده در
 [`docs/BUGS.md`](docs/BUGS.md).
 
@@ -173,6 +173,9 @@ node scripts/web_test.js --url http://127.0.0.1:5900 --token secret123
 
 # صحت QR با دیکودر مستقل (OpenCV)                  → 3 payload
 python3 scripts/qr_verify.py
+
+# پایداری اتصال بی‌کار (پینگ/پونگ واقعی، ۳۵ ثانیه)      → 2 check
+python3 scripts/keepalive_test.py --port 5900 --token secret123
 
 # تست‌های واحد سرور (Go)                            → 49 test
 cd server && go test ./...

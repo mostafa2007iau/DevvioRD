@@ -12,15 +12,16 @@ Go 1.27.3 · Java 21 (jdk4py) · Node 20+
 
 | مجموعه | تعداد | نتیجه | دستور |
 | --- | ---: | --- | --- |
-| Go unit / integration (سرور) | 49 | ✅ 0 failure | `cd server && go test ./...` |
+| Go unit / integration (سرور) | 50 | ✅ 0 failure | `cd server && go test ./...` |
 | Go با race detector | 7 پکیج | ✅ پاک | `cd server && go test ./... -race` |
 | منطق اپ اندروید روی JVM | 103 | ✅ 0 failure | `python3 scripts/jvm_tests.py` |
 | پروتکل + استریم (WebSocket واقعی) | 21 | ✅ 0 failure | `python3 scripts/integration_test.py --port 5902 --token secret123` |
 | انتقال فایل (HTTP واقعی) | 20 | ✅ 0 failure | `python3 scripts/files_test.py --port 5902 --token secret123` |
 | کلاینت وب (jsdom) | 75 | ✅ 0 failure | `node scripts/web_test.js --url http://127.0.0.1:5902 --token secret123` |
+| پایداری اتصال بی‌کار (ping/pong واقعی) | 2 | ✅ 0 failure | `python3 scripts/keepalive_test.py --port 5902 --token secret123` |
 | صحت QR با دیکودر مستقل | 3 | ✅ 3/3 | `python3 scripts/qr_verify.py` |
 | ساختار فایل APK | 14 | ✅ 0 failure | `python3 scripts/verify_apk.py` |
-| **جمع** | **285** | **همه سبز** | |
+| **جمع** | **288** | **همه سبز** | |
 
 فاز ۲ سی بررسی جدید اضافه کرد (۳۳ تست JVM برای `Hosts`، ۳۶ تست وب برای آمار،
 پیش‌تنظیم‌ها، تب مخفی، میان‌برها و دیالوگ‌ها، و یک تست Go برای توقف هر‌نشست).
@@ -261,8 +262,11 @@ signature schemes            v1 + v2 + v3
 
 ### ۱۱.۲ اجرای فاز ۲ (همه سبز)
 
+> پروب پایداری اتصال (`scripts/keepalive_test.py`) ۳۵ ثانیه منتظر می‌ماند و دو
+> پینگ واقعی می‌بیند؛ در اجرای کامل هم همین نتیجه گرفته شد.
+
 ```
-Go            : go vet ./... پاک · go test ./...  → ۷ پکیج ok · ۴۹ تست
+Go            : go vet ./... پاک · go test ./...  → ۷ پکیج ok · ۵۰ تست
 Go -race      : go test ./... -race             → ۷ پکیج ok
 JVM           : 103 passed, 0 failed
 integration   : 21 passed, 0 failed   (پورت 5902، سرور ساخته‌شده از همین سورس)
