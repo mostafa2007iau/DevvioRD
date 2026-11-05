@@ -266,7 +266,9 @@ Go            : go vet ./... پاک · go test ./...  → ۷ پکیج ok · ۴۹
 Go -race      : go test ./... -race             → ۷ پکیج ok
 JVM           : 94 passed, 0 failed
 integration   : 21 passed, 0 failed   (پورت 5902، سرور ساخته‌شده از همین سورس)
-files         : 20 passed, 0 failed
+files         : 20 passed, 0 failed   (دو بررسی احراز هویت: روی سرور دارای توکن
+                «۴۰۱ برای درخواست بدون/با توکن غلط» و روی سرور بدون توکن «دسترسی
+                آزاد» بررسی می‌شود — هر دو حالت ۲۰/۲۰)
 web (jsdom)   : 75 passed, 0 failed   (با توکن و بدون توکن، هر دو ۷۵/۷۵)
 QR            : 3/3 payloads
 APK           : 14 passed, 0 failed

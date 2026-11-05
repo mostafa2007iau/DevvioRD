@@ -111,6 +111,20 @@ def main():
             ok("wrong token rejected")
         else:
             bad("wrong token rejected", f"got {code}")
+    else:
+        # A --no-auth server (the public preview) intentionally serves files to
+        # anyone. Both counts stay at 20 in either mode.
+        anon = Api(f"http://{args.host}:{args.port}", "")
+        code, _ = anon.get_json("/api/files?dir=")
+        if code == 200:
+            ok("no-auth server serves files without a token")
+        else:
+            bad("no-auth server serves files without a token", f"got {code}")
+        code, _ = Api(f"http://{args.host}:{args.port}", "wrong").get_json("/api/files?dir=")
+        if code == 200:
+            ok("token is ignored when the server has none")
+        else:
+            bad("token is ignored when the server has none", f"got {code}")
 
     # --- small text file (phone -> server) ---
     payload = "hello from the phone\nسلام دنیا\nline3\n".encode("utf-8")
