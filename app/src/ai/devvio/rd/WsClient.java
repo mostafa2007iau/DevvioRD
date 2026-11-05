@@ -223,7 +223,17 @@ public final class WsClient {
                 bytesIn.addAndGet(payload.length + 2);
                 switch (op) {
                     case 0x9: // ping
-                        writeFrame(0xA, payload);
+                        // Answer with a pong carrying the same payload, as RFC
+                        // 6455 requires. The server pings every 15 s and drops a
+                        // connection that stays silent for 90 s, so a client that
+                        // ignored ping frames lost its session whenever the user
+                        // stopped touching the screen for a minute and a half.
+                        try {
+                            writeFrame(0xA, payload);
+                        } catch (IOException e) {
+                            closeInternal("pong failed", true);
+                            return;
+                        }
                         continue;
                     case 0xA: // pong
                         continue;

@@ -41,6 +41,15 @@ type session struct {
 
 var sessionCounter atomic.Uint64
 
+// Keepalive timing, named so the relationship between the two is testable:
+// the server pings every pingInterval and gives up only after readDeadline
+// without any inbound traffic. A client that ignores ping frames (the Android
+// app used to) must still fit comfortably inside readDeadline.
+var (
+	pingInterval = 15 * time.Second
+	readDeadline = 90 * time.Second
+)
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	if !s.checkAuth(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -133,7 +142,7 @@ func (s *session) send(b []byte) {
 }
 
 func (s *session) writeLoop() {
-	pingTicker := time.NewTicker(15 * time.Second)
+	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
 
 	write := func(b []byte) bool {
@@ -187,7 +196,7 @@ func (s *session) writeLoop() {
 func (s *session) readLoop() {
 	for {
 		// Timeout protects against half-open connections; clients ping every 5s.
-		op, payload, err := s.conn.readMessage(90 * time.Second)
+		op, payload, err := s.conn.readMessage(readDeadline)
 		if err != nil {
 			return
 		}
