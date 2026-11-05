@@ -52,7 +52,6 @@ public final class WsClient {
     private InputStream in;
     private OutputStream out;
     private Thread reader;
-    private Thread writer;
     private volatile boolean stopRequested;
 
     private final Object writeLock = new Object();

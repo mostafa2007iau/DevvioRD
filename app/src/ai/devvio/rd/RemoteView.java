@@ -283,7 +283,6 @@ public class RemoteView extends View {
         private boolean busy;
 
         private final BitmapFactory.Options opts = new BitmapFactory.Options();
-        private final Matrix matrix = new Matrix();
 
         private Decoder() {
             opts.inPreferredConfig = Bitmap.Config.ARGB_8888;

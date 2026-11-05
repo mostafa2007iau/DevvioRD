@@ -172,7 +172,7 @@ python3 scripts/verify_apk.py       # 14 passed, 0 failed
 
 ```
 dist/DevvioRD-1.0.0.apk      82,731 bytes   (فاز ۲: رابط بازطراحی‌شده)
-sha256                       f2805330b69d4e6a18b25c8a114e647e293a4eeddb9245337e7b9f798692d17b
+sha256                       8c2bb97c0d5efa244b2596d1a819c808c793887c52e5e2d8616cac0a6d5fedf1
 signature schemes            v1 + v2 + v3
 ```
 

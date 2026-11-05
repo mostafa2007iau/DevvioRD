@@ -30,7 +30,6 @@ public final class ImeBridge {
     private final Sink sink;
     private final Mirror mirror = new Mirror();
     private boolean suppress;
-    private StringBuilder scratch = new StringBuilder();
 
     public ImeBridge(Sink sink) {
         this.sink = sink;
